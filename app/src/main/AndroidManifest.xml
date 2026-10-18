@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Package visibility for Android 11+ (API 30+).
+        Using <queries> with MAIN/LAUNCHER intent is sufficient to discover
+        all launchable apps via PackageManager.queryIntentActivities().
+        Alternative: QUERY_ALL_PACKAGES permission would also work but is
+        restricted on Play Store and not required for this use case.
+
+        TRADE-OFFS:
+        - <queries> approach: works for most launchable apps, Play Store compliant,
+          minimal permissions, recommended by Google.
+        - QUERY_ALL_PACKAGES: guarantees complete app enumeration including
+          non-launchable packages, but requires Play Store declaration/approval
+          and exposes all packages. Not needed here since we only show launchable
+          apps that the user can actually launch.
+
+        This launcher uses <queries> only and requests NO permissions.
+        It will correctly list all apps with a launcher activity.
+        If an app has no launcher activity it cannot be launched anyway,
+        so it is intentionally excluded.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.HiddenLauncher"
+        android:supportsRtl="true">
+
+        <!--
+            Main activity - stable component for Keymapper.
+            Package: com.hidden.launcher
+            Activity: .MainActivity
+            Component string for Keymapper: com.hidden.launcher/com.hidden.launcher.MainActivity
+            This activity has standard MAIN/LAUNCHER intent-filter so Keymapper can launch it
+            as a normal app. Do NOT hide/disable this activity.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".AppPickerActivity"
+            android:exported="false"
+            android:label="@string/settings_title"
+            android:parentActivityName=".MainActivity" />
+
+    </application>
+
+</manifest>
