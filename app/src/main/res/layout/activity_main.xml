@@ -78,8 +78,10 @@
         android:gravity="center"
         android:padding="8dp"
         android:text="@string/hint_long_press_settings"
-        android:textSize="11sp"
+        android:textSize="10sp"
         android:alpha="0.5"
+        android:maxLines="2"
+        android:ellipsize="end"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />

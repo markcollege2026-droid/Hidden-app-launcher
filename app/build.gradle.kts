@@ -17,6 +17,19 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            // Demo release keystore committed for CI - not for production use
+            // Passwords are intentionally simple for this sample
+            storeFile = file("release.keystore")
+            storePassword = "hidden123"
+            keyAlias = "launcher"
+            keyPassword = "hidden123"
+            isV1SigningEnabled = true
+            isV2SigningEnabled = true
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -24,6 +37,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
             isDebuggable = true

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="?attr/selectableItemBackgroundBorderless"
+    android:clickable="true"
+    android:focusable="true"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <FrameLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content">
+
+        <ImageView
+            android:id="@+id/groupIcon"
+            android:layout_width="@dimen/app_icon_size"
+            android:layout_height="@dimen/app_icon_size"
+            android:contentDescription="@string/content_desc_group" />
+
+        <TextView
+            android:id="@+id/groupCount"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:background="#CC000000"
+            android:paddingHorizontal="4dp"
+            android:paddingVertical="1dp"
+            android:textColor="#FFFFFF"
+            android:textSize="9sp"
+            android:text="2" />
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/groupLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:ellipsize="end"
+        android:gravity="center"
+        android:maxLines="2"
+        android:textSize="12sp"
+        android:lineHeight="14sp"
+        android:textStyle="bold" />
+
+</LinearLayout>

@@ -1,7 +1,6 @@
 .gradle
 build
 app/build
-app/release
 local.properties
 *.iml
 .idea
@@ -11,5 +10,6 @@ out/
 captures/
 .externalNativeBuild
 .cxx
-*.keystore
+# Allow release keystore for signed builds (demo - not for production)
+!app/release.keystore
 *.jks
