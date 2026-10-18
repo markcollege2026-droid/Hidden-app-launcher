@@ -20,6 +20,8 @@
     <string name="launch_security_error">Security error: cannot launch app</string>
     <string name="launch_failed">Launch failed: %1$s</string>
     <string name="content_desc_app_icon">App icon</string>
+    <string name="close">Close</string>
+    <string name="tap_app_to_launch_hint">Tap an app to launch • Long-press folder for options</string>
     <string name="hint_long_press_settings">Long-press background for Settings</string>
     <string name="content_desc_group">Group icon</string>
     <string name="group_created">Group \"%1$s\" created with %2$d apps</string>

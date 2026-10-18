@@ -8,7 +8,7 @@ Minimal, lightweight custom app launcher for Android 11–14 (API 30–34), desi
 - **App picker** with search, icons, package names, and checkboxes.
 - **Persists selection** via `SharedPreferences` across restarts and reboots (no DB).
 - **Compact responsive grid** (3–5 columns depending on screen width) — tap to launch.
-- **Group by drag-and-drop**: long-press an app and drag it onto another — creates a named group containing both. Drag app onto group to add, group onto group to merge, tap group to open member list, long-press group to rename/delete/ungroup.
+- **Grouped folders with polished UI**: long-press an app and drag it onto another — creates a named group. **Closed folder (home screen):** icon-sized rounded/circular `MaterialCardView` container showing a mini-preview of 2–4 app icons (optionally up to 9) arranged in a balanced grid (2×2 for 2–4, 3×3 for 5–9), with folder name below — acts as a single tappable home-screen item. **Tap → open:** triggers an animated expansion from the folder icon’s position (circular reveal) into a focused overlay with dimmed background. **Open folder view:** apps laid out in a scrollable grid (3 columns on phones, 4 on tablets, configurable to 3×3/4×4/5×5) with full-sized icons+labels on a customizable popup card panel (rounded 20dp, elevation 8dp); optional “large folder” pattern noted for future direct-on-home reveal. Drag app onto group / group onto app / group onto group to add/merge; long-press group to rename/delete/ungroup.
 - **Graceful handling** of uninstalled/disabled/non-launchable apps (greyed-out, toast, no crash).
 - **Discreet settings access**: overflow menu (⋮ → Settings), button in empty state, and long-press on background.
 - **Keymapper-ready**: stable `MAIN/LAUNCHER` component, no root/service required.
@@ -35,8 +35,8 @@ Minimal, lightweight custom app launcher for Android 11–14 (API 30–34), desi
 1. Select at least 2 apps in Settings (⋮ → Settings → check apps → Save).
 2. On main grid, **long-press one app** — drag shadow appears.
 3. **Drag it onto another app** and drop — a dialog prompts for group name (default: "Chrome + Maps"). Tap Create.
-4. The grid now shows a **folder tile** (yellow folder, group name, "2 apps" badge) instead of the two individuals.
-5. **Tap group** → list members → tap to launch. From that dialog you can Rename or Ungroup.
+4. The grid now shows a **folder tile**: rounded container (56dp, 16dp radius, elevation 2dp) showing a mini-preview grid of member icons balanced (2→2×1, 3→2×2 with placeholder, 4→2×2, 5–6→3×2, 7–9→3×3) with folder name below.
+5. **Tap folder** → animated circular-reveal expansion from icon position into dimmed overlay (`#99000000`) + centered card panel; inside a scrollable grid (3 columns phone / 4 tablet) with full icons+labels; tap app to launch (overlay stays for multi-launch), tap dim or ✕ or Back to close with reverse reveal. Footer hint “Tap an app to launch”.
 6. **Drag another app onto the group** → adds to that group.
 7. **Drag group icon onto another app** → adds that app to the group.
 8. **Drag group onto group** → merges.
