@@ -1,0 +1,15 @@
+.gradle
+build
+app/build
+local.properties
+*.iml
+.idea
+.DS_Store
+.gradle/
+out/
+captures/
+.externalNativeBuild
+.cxx
+# Allow release keystore for signed builds (demo - not for production)
+!app/release.keystore
+*.jks

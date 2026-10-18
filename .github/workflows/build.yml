@@ -1,0 +1,89 @@
+name: Build Hidden Launcher
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Setup Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          sdkmanager --version || echo "sdkmanager missing"
+          yes | sdkmanager --licenses 2>&1 | tail -5 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" 2>&1 | tail -20
+
+      - name: Verify release keystore
+        run: |
+          ls -lh app/release.keystore || echo "No release keystore found!"
+          if [ -f app/release.keystore ]; then
+            echo "Release keystore present"
+            openssl pkcs12 -info -in app/release.keystore -passin pass:hidden123 -nokeys -noout 2>&1 | head -20 || echo "Cannot inspect with openssl, but file exists"
+          fi
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Lint check
+        run: ./gradlew lintDebug --stacktrace
+        continue-on-error: true
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build signed release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: APK size & signing info
+        run: |
+          echo "=== Debug APK ==="
+          ls -lh app/build/outputs/apk/debug/*.apk
+          du -h app/build/outputs/apk/debug/*.apk
+          echo "=== Release APK (signed) ==="
+          ls -lh app/build/outputs/apk/release/*.apk
+          du -h app/build/outputs/apk/release/*.apk
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose app/build/outputs/apk/release/app-release.apk 2>&1 | head -50 || echo "apksigner verify attempted"
+          fi
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hidden-launcher-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Upload signed release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hidden-launcher-signed-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
