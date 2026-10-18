@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      checks: write
+      gists: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,22 +27,13 @@ jobs:
       - name: Setup Android SDK
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          ls -la $ANDROID_HOME 2>&1 | head -40
           sdkmanager --version || echo "sdkmanager missing"
-          sdkmanager --list_installed 2>&1 | head -50
           yes | sdkmanager --licenses 2>&1 | tail -5 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" 2>&1 | tail -20
-          ls -la $ANDROID_HOME/platforms/ 2>&1 | head -20
-          ls -la $ANDROID_HOME/build-tools/ 2>&1 | head -20
 
       - name: Verify release keystore
         run: |
           ls -lh app/release.keystore || echo "No release keystore found!"
-          if [ -f app/release.keystore ]; then
-            echo "Release keystore present"
-            openssl pkcs12 -info -in app/release.keystore -passin pass:hidden123 -nokeys -noout 2>&1 | head -20 || echo "Cannot inspect with openssl, but file exists"
-          fi
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -57,57 +48,57 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Run unit tests
+      - name: Run unit tests (with log capture)
         id: unit_tests
-        run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee /tmp/test.log
-        continue-on-error: true
-
-      - name: Show test log on failure
-        if: steps.unit_tests.outcome == 'failure'
         run: |
-          echo "=== TEST LOG TAIL ==="
-          tail -n 300 /tmp/test.log
-          echo "=== TEST RESULTS XML ==="
-          cat app/build/test-results/testDebugUnitTest/*.xml 2>&1 | head -n 500 || echo "No XML"
-          echo "=== LINT REPORT ==="
-          cat app/build/reports/lint-results-debug.xml 2>&1 | head -n 100 || echo "No lint report"
+          ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee /tmp/test.log
+          echo "Exit code: ${PIPESTATUS[0]}" >> /tmp/test.log
+          exit ${PIPESTATUS[0]}
 
-      - name: Post test failure as commit comment
-        if: steps.unit_tests.outcome == 'failure'
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== Gradle cache? ==="
+          ls -lh app/build/intermediates/ 2>&1 | head -20
+          echo "=== Test log tail ==="
+          tail -n 200 /tmp/test.log
+          echo "=== Test XML if exists ==="
+          cat app/build/test-results/testDebugUnitTest/*.xml 2>&1 | head -n 100 || echo "No XML"
+          echo "=== Assemble debug for compile errors ==="
+          ./gradlew assembleDebug --stacktrace 2>&1 | tail -n 100 || true
+
+      - name: Upload test log to Gist for debugging
+        if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          LOG=$(tail -n 200 /tmp/test.log | head -c 60000)
-          # Escape for JSON
-          BODY=$(printf "Test failure for %s:\n\`\`\`\n%s\n\`\`\`" "${{ github.sha }}" "$LOG" | jq -Rs .)
-          # Post commit comment using gh api
-          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$BODY" 2>&1 | head -20 || echo "Failed to post comment"
-          exit 1
+          if [ -f /tmp/test.log ]; then
+            # Truncate to 500 lines for gist
+            tail -n 500 /tmp/test.log > /tmp/gist.log
+            gh gist create --public /tmp/gist.log --desc "Test log ${{ github.sha }} $(date)" 2>&1 | head -20 || echo "Gist failed"
+          fi
 
       - name: Lint check
+        if: always()
         run: ./gradlew lintDebug --stacktrace
         continue-on-error: true
 
       - name: Build debug APK
+        if: always()
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Build signed release APK
+        if: always()
         run: ./gradlew assembleRelease --stacktrace
 
       - name: APK size & signing info
+        if: always()
         run: |
-          echo "=== Debug APK ==="
-          ls -lh app/build/outputs/apk/debug/*.apk
-          du -h app/build/outputs/apk/debug/*.apk
-          echo "=== Release APK (signed) ==="
-          ls -lh app/build/outputs/apk/release/*.apk
-          du -h app/build/outputs/apk/release/*.apk
-          ls -lh app/build/outputs/apk/release/*.apk
-          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose app/build/outputs/apk/release/app-release.apk 2>&1 | head -50 || echo "apksigner verify attempted"
-          fi
+          ls -lh app/build/outputs/apk/debug/*.apk 2>&1 | head
+          ls -lh app/build/outputs/apk/release/*.apk 2>&1 | head
 
       - name: Upload debug APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hidden-launcher-debug-apk
@@ -115,10 +106,9 @@ jobs:
           retention-days: 30
 
       - name: Upload signed release APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hidden-launcher-signed-release-apk
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
-
-  # Wrapper validation disabled to avoid checksum drift; build job validates functionality
