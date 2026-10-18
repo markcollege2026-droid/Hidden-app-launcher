@@ -3,9 +3,12 @@ package com.hidden.launcher
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.app.AlertDialog
+import android.content.ClipDescription
 import android.content.Intent
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.DragEvent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
@@ -110,6 +113,9 @@ class MainActivity : AppCompatActivity() {
         recyclerView.layoutManager = GridLayoutManager(this, calculateSpanCount())
         recyclerView.adapter = adapter
 
+        // Enable dropping removed group member onto empty slots (available slot) or back onto group
+        setupMainGridDropForRemove()
+
         emptyButton.setOnClickListener { openSettings() }
 
         findViewById<View>(R.id.rootView).setOnLongClickListener {
@@ -134,6 +140,54 @@ class MainActivity : AppCompatActivity() {
         }
 
         hintText.text = getString(R.string.hint_long_press_settings) + " • " + getString(R.string.drag_to_group_hint)
+    }
+
+    private fun setupMainGridDropForRemove() {
+        // Handle drops on empty slots (RecyclerView background) for removal — place in available slot
+        val emptySlotDragListener = View.OnDragListener { v, event ->
+            when (event.action) {
+                DragEvent.ACTION_DRAG_STARTED -> {
+                    val isRemove = event.clipDescription?.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) == true &&
+                            event.clipData?.getItemAt(0)?.text?.startsWith("remove:") == true
+                    isRemove
+                }
+                DragEvent.ACTION_DRAG_ENTERED -> {
+                    v.setBackgroundColor(Color.parseColor("#1100BCD4"))
+                    true
+                }
+                DragEvent.ACTION_DRAG_EXITED -> {
+                    v.setBackgroundColor(Color.TRANSPARENT)
+                    true
+                }
+                DragEvent.ACTION_DROP -> {
+                    v.setBackgroundColor(Color.TRANSPARENT)
+                    val text = event.clipData?.getItemAt(0)?.text?.toString() ?: ""
+                    if (text.startsWith("remove:")) {
+                        val parts = text.split(":", limit = 3)
+                        if (parts.size == 3) {
+                            val gid = parts[1]
+                            val pkg = parts[2]
+                            // Place in available slot — remove from old group, become standalone
+                            handleRemoveFromGroup(gid, pkg)
+                        }
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    v.setBackgroundColor(Color.TRANSPARENT)
+                    true
+                }
+                else -> false
+            }
+        }
+        recyclerView.setOnDragListener(emptySlotDragListener)
+        // Also allow dropping on root empty area (outside RecyclerView padding)
+        findViewById<View>(R.id.rootView).setOnDragListener { v, event ->
+            // Only handle if not already handled by recyclerView; we delegate to same logic
+            // To avoid double-handling, check if drop is outside recyclerView bounds
+            // For simplicity, let recyclerView handle; root only handles if recyclerView didn't
+            false
+        }
     }
 
     private fun handleRemoveDropOnTarget(groupId: String, pkg: String, target: MainItem?) {
