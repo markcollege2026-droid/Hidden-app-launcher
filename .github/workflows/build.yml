@@ -10,6 +10,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      checks: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,7 +58,31 @@ jobs:
         run: chmod +x gradlew
 
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+        id: unit_tests
+        run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee /tmp/test.log
+        continue-on-error: true
+
+      - name: Show test log on failure
+        if: steps.unit_tests.outcome == 'failure'
+        run: |
+          echo "=== TEST LOG TAIL ==="
+          tail -n 300 /tmp/test.log
+          echo "=== TEST RESULTS XML ==="
+          cat app/build/test-results/testDebugUnitTest/*.xml 2>&1 | head -n 500 || echo "No XML"
+          echo "=== LINT REPORT ==="
+          cat app/build/reports/lint-results-debug.xml 2>&1 | head -n 100 || echo "No lint report"
+
+      - name: Post test failure as commit comment
+        if: steps.unit_tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LOG=$(tail -n 200 /tmp/test.log | head -c 60000)
+          # Escape for JSON
+          BODY=$(printf "Test failure for %s:\n\`\`\`\n%s\n\`\`\`" "${{ github.sha }}" "$LOG" | jq -Rs .)
+          # Post commit comment using gh api
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$BODY" 2>&1 | head -20 || echo "Failed to post comment"
+          exit 1
 
       - name: Lint check
         run: ./gradlew lintDebug --stacktrace
