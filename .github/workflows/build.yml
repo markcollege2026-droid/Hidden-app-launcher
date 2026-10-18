@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      gists: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,57 +47,46 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Run unit tests (with log capture)
+      - name: Run unit tests
         id: unit_tests
-        run: |
-          ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee /tmp/test.log
-          echo "Exit code: ${PIPESTATUS[0]}" >> /tmp/test.log
-          exit ${PIPESTATUS[0]}
+        run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee /tmp/test.log; exit ${PIPESTATUS[0]}
 
-      - name: Diagnostics on failure
-        if: failure()
-        run: |
-          echo "=== Gradle cache? ==="
-          ls -lh app/build/intermediates/ 2>&1 | head -20
-          echo "=== Test log tail ==="
-          tail -n 200 /tmp/test.log
-          echo "=== Test XML if exists ==="
-          cat app/build/test-results/testDebugUnitTest/*.xml 2>&1 | head -n 100 || echo "No XML"
-          echo "=== Assemble debug for compile errors ==="
-          ./gradlew assembleDebug --stacktrace 2>&1 | tail -n 100 || true
-
-      - name: Upload test log to Gist for debugging
+      - name: Diagnostics on failure (post commit comment)
         if: failure()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -f /tmp/test.log ]; then
-            # Truncate to 500 lines for gist
-            tail -n 500 /tmp/test.log > /tmp/gist.log
-            gh gist create --public /tmp/gist.log --desc "Test log ${{ github.sha }} $(date)" 2>&1 | head -20 || echo "Gist failed"
-          fi
+          echo "=== Test log tail ==="
+          tail -n 200 /tmp/test.log > /tmp/tail.log
+          cat /tmp/tail.log
+          echo "=== Posting commit comment with log ==="
+          # Prepare JSON-escaped body
+          LOG=$(tail -n 150 /tmp/test.log | sed 's/"/\\"/g' | head -c 60000)
+          JSON=$(printf '{"body":"Test failure for %s:\n```\n%s\n```"}' "${{ github.sha }}" "$LOG")
+          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d "$JSON" "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" 2>&1 | head -20 || echo "Comment post failed"
+          # Also try to run assemble for compile error details
+          echo "=== Assemble debug ==="
+          ./gradlew assembleDebug --stacktrace 2>&1 | tail -n 100 || true
 
       - name: Lint check
-        if: always()
         run: ./gradlew lintDebug --stacktrace
         continue-on-error: true
 
       - name: Build debug APK
-        if: always()
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Build signed release APK
-        if: always()
         run: ./gradlew assembleRelease --stacktrace
 
       - name: APK size & signing info
-        if: always()
         run: |
           ls -lh app/build/outputs/apk/debug/*.apk 2>&1 | head
           ls -lh app/build/outputs/apk/release/*.apk 2>&1 | head
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose app/build/outputs/apk/release/app-release.apk 2>&1 | head -20 || true
+          fi
 
       - name: Upload debug APK
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hidden-launcher-debug-apk
@@ -106,7 +94,6 @@ jobs:
           retention-days: 30
 
       - name: Upload signed release APK
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hidden-launcher-signed-release-apk
