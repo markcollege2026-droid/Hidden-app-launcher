@@ -42,10 +42,8 @@ class GroupTest {
             AppGroup("id1", "Alpha", listOf("com.a", "com.b"))
         )
         val items = PrefsHelper.buildDisplayItems(displays, groups)
-        // Groups sorted by name: Alpha first, Zebra second - but Zebra has only 1 member? Actually our build includes groups with at least 1 member
-        // However our current logic shows group even with 1 member if present; but prune would remove single-member groups
-        // For test we keep as given
-        assertEquals(3, items.size)
+        // All 3 apps are grouped: Alpha covers a,b; Zebra covers c => 2 groups total, no remaining individuals
+        assertEquals(2, items.size)
         assertTrue((items[0] as? MainItem.Group)?.group?.name == "Alpha")
         assertTrue((items[1] as? MainItem.Group)?.group?.name == "Zebra")
     }
