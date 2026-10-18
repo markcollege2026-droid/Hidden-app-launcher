@@ -25,14 +25,12 @@ jobs:
 
       - name: Setup Android SDK
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
           sdkmanager --version || echo "sdkmanager missing"
           yes | sdkmanager --licenses 2>&1 | tail -5 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" 2>&1 | tail -20
 
       - name: Verify release keystore
-        run: |
-          ls -lh app/release.keystore || echo "No release keystore found!"
+        run: ls -lh app/release.keystore || echo "No keystore"
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -47,55 +45,75 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Run unit tests
-        id: unit_tests
-        run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee /tmp/test.log; exit ${PIPESTATUS[0]}
+      - name: Compile debug (capture log)
+        id: compile
+        run: ./gradlew assembleDebug --stacktrace 2>&1 | tee /tmp/compile.log; exit ${PIPESTATUS[0]}
 
-      - name: Diagnostics on failure (post commit comment)
-        if: failure()
+      - name: Post compile failure
+        if: failure() && steps.compile.outcome == 'failure'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== Test log tail ==="
-          tail -n 200 /tmp/test.log > /tmp/tail.log
-          cat /tmp/tail.log
-          echo "=== Posting commit comment with log ==="
-          # Prepare JSON-escaped body
-          LOG=$(tail -n 150 /tmp/test.log | sed 's/"/\\"/g' | head -c 60000)
-          JSON=$(printf '{"body":"Test failure for %s:\n```\n%s\n```"}' "${{ github.sha }}" "$LOG")
-          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d "$JSON" "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" 2>&1 | head -20 || echo "Comment post failed"
-          # Also try to run assemble for compile error details
-          echo "=== Assemble debug ==="
-          ./gradlew assembleDebug --stacktrace 2>&1 | tail -n 100 || true
+          tail -n 200 /tmp/compile.log > /tmp/compile_tail.log
+          BODY=$(cat /tmp/compile_tail.log | head -c 50000)
+          jq -n --arg body "Compile failure $GITHUB_SHA:
+          \`\`\`
+          $BODY
+          \`\`\`" '{body: $body}' > /tmp/payload.json
+          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d @/tmp/payload.json "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" | head -20 || echo "post failed"
+
+      - name: Run unit tests
+        if: success()
+        id: unit_tests
+        run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee /tmp/test.log; exit ${PIPESTATUS[0]}
+
+      - name: Post test failure
+        if: failure() && steps.unit_tests.outcome == 'failure'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tail -n 300 /tmp/test.log > /tmp/test_tail.log
+          BODY=$(cat /tmp/test_tail.log | head -c 50000)
+          jq -n --arg body "Test failure $GITHUB_SHA:
+          \`\`\`
+          $BODY
+          \`\`\`" '{body: $body}' > /tmp/payload.json
+          curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d @/tmp/payload.json "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" | head -20 || echo "post failed"
+          cat /tmp/test.log | grep -A2 -B2 "FAILED\|Exception" | head -n 50 || true
 
       - name: Lint check
+        if: always()
         run: ./gradlew lintDebug --stacktrace
         continue-on-error: true
 
       - name: Build debug APK
+        if: success() || steps.unit_tests.outcome == 'success'
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Build signed release APK
+        if: success() || steps.unit_tests.outcome == 'success'
         run: ./gradlew assembleRelease --stacktrace
 
       - name: APK size & signing info
+        if: always()
         run: |
           ls -lh app/build/outputs/apk/debug/*.apk 2>&1 | head
           ls -lh app/build/outputs/apk/release/*.apk 2>&1 | head
-          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
-            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose app/build/outputs/apk/release/app-release.apk 2>&1 | head -20 || true
-          fi
 
       - name: Upload debug APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hidden-launcher-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
+          if-no-files-found: warn
 
       - name: Upload signed release APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: hidden-launcher-signed-release-apk
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
+          if-no-files-found: warn
