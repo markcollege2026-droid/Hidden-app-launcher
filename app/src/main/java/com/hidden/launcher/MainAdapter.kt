@@ -158,10 +158,26 @@ class MainAdapter(
             val members = item.memberDisplays
             labelView.text = group.name
             buildPreview(members)
-            itemView.setOnClickListener {
+            // Make entire grouped item tappable anywhere — folder icon, preview, label
+            val openClick = View.OnClickListener {
                 onGroupClicked(group, members, folderCard)
             }
+            itemView.setOnClickListener(openClick)
+            folderCard.setOnClickListener(openClick)
+            previewGrid.setOnClickListener(openClick)
+            labelView.setOnClickListener(openClick)
+
             itemView.setOnLongClickListener {
+                onGroupLongClicked(group)
+                true
+            }
+            // Also allow long-press on label to trigger options
+            labelView.setOnLongClickListener {
+                onGroupLongClicked(group)
+                true
+            }
+            // Preview grid also supports long-press for options (if not dragging)
+            previewGrid.setOnLongClickListener {
                 onGroupLongClicked(group)
                 true
             }
