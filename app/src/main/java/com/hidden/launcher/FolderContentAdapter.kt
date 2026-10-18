@@ -75,7 +75,7 @@ class FolderContentAdapter(
                     true
                 } else {
                     if (onAppLongClicked != null) {
-                        onAppLongClicked(item)
+                        onAppLongClicked.invoke(item)
                         true
                     } else false
                 }
