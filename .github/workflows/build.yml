@@ -54,8 +54,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tail -n 200 /tmp/compile.log > /tmp/compile_tail.log
-          BODY=$(cat /tmp/compile_tail.log | head -c 50000)
+          echo "=== Full compile log grep e: ===" > /tmp/compile_grep.log
+          grep -n "e:\|error:" /tmp/compile.log | head -n 100 >> /tmp/compile_grep.log || echo "No grep match" >> /tmp/compile_grep.log
+          cat /tmp/compile.log | head -n 500 >> /tmp/compile_grep.log
+          tail -n 200 /tmp/compile.log >> /tmp/compile_grep.log
+          BODY=$(cat /tmp/compile_grep.log | head -c 50000)
           jq -n --arg body "Compile failure $GITHUB_SHA:
           \`\`\`
           $BODY
@@ -72,14 +75,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tail -n 300 /tmp/test.log > /tmp/test_tail.log
-          BODY=$(cat /tmp/test_tail.log | head -c 50000)
+          grep -n "FAILED\|e:\|error:" /tmp/test.log | head -n 100 > /tmp/test_grep.log
+          cat /tmp/test_grep.log
+          BODY=$(cat /tmp/test_grep.log | head -c 50000)
           jq -n --arg body "Test failure $GITHUB_SHA:
           \`\`\`
           $BODY
           \`\`\`" '{body: $body}' > /tmp/payload.json
           curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" -H "Content-Type: application/json" -d @/tmp/payload.json "https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments" | head -20 || echo "post failed"
-          cat /tmp/test.log | grep -A2 -B2 "FAILED\|Exception" | head -n 50 || true
 
       - name: Lint check
         if: always()
