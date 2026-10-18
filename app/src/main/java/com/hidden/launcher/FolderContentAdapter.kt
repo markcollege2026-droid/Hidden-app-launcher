@@ -1,5 +1,7 @@
 package com.hidden.launcher
 
+import android.content.ClipData
+import android.os.Build
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -9,16 +11,19 @@ import androidx.recyclerview.widget.RecyclerView
 
 /**
  * Adapter for open folder view: scrollable grid with full-sized icons and labels
- * Supports 3x3, 4x4, 5x5 per page via GridLayoutManager span count
+ * Supports long-press to remove from group the same way groups are made (drag)
  */
 class FolderContentAdapter(
-    private val onAppClicked: (SelectedAppDisplay) -> Unit
+    private val onAppClicked: (SelectedAppDisplay) -> Unit,
+    private val onAppLongClicked: ((SelectedAppDisplay) -> Unit)? = null
 ) : RecyclerView.Adapter<FolderContentAdapter.ViewHolder>() {
 
     private var items: List<SelectedAppDisplay> = emptyList()
+    private var currentGroupId: String? = null
 
-    fun submitList(newItems: List<SelectedAppDisplay>) {
+    fun submitList(newItems: List<SelectedAppDisplay>, groupId: String? = null) {
         items = newItems
+        currentGroupId = groupId
         notifyDataSetChanged()
     }
 
@@ -52,6 +57,28 @@ class FolderContentAdapter(
             }
             itemView.setOnClickListener {
                 onAppClicked(item)
+            }
+
+            // Long-press inside group to remove — same drag interaction as grouping
+            // Start drag with payload "remove:<groupId>:<packageName>" so dropping outside removes from group
+            itemView.setOnLongClickListener { v ->
+                val gid = currentGroupId
+                if (gid != null) {
+                    val clip = ClipData.newPlainText("group_member", "remove:$gid:${item.packageName}")
+                    val shadow = View.DragShadowBuilder(v)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        v.startDragAndDrop(clip, shadow, null, 0)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        v.startDrag(clip, shadow, null, 0)
+                    }
+                    true
+                } else {
+                    if (onAppLongClicked != null) {
+                        onAppLongClicked(item)
+                        true
+                    } else false
+                }
             }
         }
     }

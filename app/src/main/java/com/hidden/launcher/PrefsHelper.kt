@@ -99,7 +99,9 @@ class PrefsHelper(context: Context) {
         val groups = getGroups().mapNotNull { g ->
             if (g.id == groupId) {
                 val newList = g.packageNames.filterNot { it == packageName }
-                if (newList.isEmpty()) null else g.copy(packageNames = newList)
+                // Dissolve group if empty or single member left (per spec: group needs >=2 to be meaningful)
+                // Single remaining member will be shown as individual tile after prune; we dissolve now for immediate feedback
+                if (newList.size <= 1) null else g.copy(packageNames = newList)
             } else g
         }
         setGroups(groups)

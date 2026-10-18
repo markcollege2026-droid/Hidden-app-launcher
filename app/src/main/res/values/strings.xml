@@ -21,8 +21,11 @@
     <string name="launch_failed">Launch failed: %1$s</string>
     <string name="content_desc_app_icon">App icon</string>
     <string name="close">Close</string>
-    <string name="tap_app_to_launch_hint">Tap an app to launch • Long-press folder for options</string>
+    <string name="tap_app_to_launch_hint">Tap an app to launch • Long-press and drag out to remove</string>
     <string name="hint_long_press_settings">Long-press background for Settings</string>
+    <string name="remove_from_group">Remove from group</string>
+    <string name="removed_from_group">Removed %1$s from \"%2$s\"</string>
+    <string name="drag_out_to_remove_hint">Drag outside folder to remove</string>
     <string name="content_desc_group">Group icon</string>
     <string name="group_created">Group \"%1$s\" created with %2$d apps</string>
     <string name="group_updated">Group \"%1$s\" updated (%2$d apps)</string>
