@@ -11,11 +11,12 @@ import androidx.recyclerview.widget.RecyclerView
 
 /**
  * Adapter for open folder view: scrollable grid with full-sized icons and labels
- * Supports long-press to remove from group the same way groups are made (drag)
+ * Long-press to remove uses same drag interaction as grouping — folder shrinks to icon on drag start
  */
 class FolderContentAdapter(
     private val onAppClicked: (SelectedAppDisplay) -> Unit,
-    private val onAppLongClicked: ((SelectedAppDisplay) -> Unit)? = null
+    private val onAppLongClicked: ((SelectedAppDisplay) -> Unit)? = null,
+    private val onDragStarted: (() -> Unit)? = null
 ) : RecyclerView.Adapter<FolderContentAdapter.ViewHolder>() {
 
     private var items: List<SelectedAppDisplay> = emptyList()
@@ -59,8 +60,6 @@ class FolderContentAdapter(
                 onAppClicked(item)
             }
 
-            // Long-press inside group to remove — same drag interaction as grouping
-            // Start drag with payload "remove:<groupId>:<packageName>" so dropping outside removes from group
             itemView.setOnLongClickListener { v ->
                 val gid = currentGroupId
                 if (gid != null) {
@@ -72,6 +71,8 @@ class FolderContentAdapter(
                         @Suppress("DEPRECATION")
                         v.startDrag(clip, shadow, null, 0)
                     }
+                    // Notify activity to shrink folder back to icon so home slots are visible
+                    onDragStarted?.invoke()
                     true
                 } else {
                     if (onAppLongClicked != null) {

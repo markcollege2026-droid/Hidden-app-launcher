@@ -19,7 +19,8 @@ class MainAdapter(
     private val onAppClicked: (SelectedAppDisplay) -> Unit,
     private val onGroupClicked: (AppGroup, List<SelectedAppDisplay>, View) -> Unit,
     private val onGroupLongClicked: (AppGroup) -> Unit,
-    private val onAppDroppedOnto: (dragged: MainItem, target: MainItem) -> Unit
+    private val onAppDroppedOnto: (dragged: MainItem, target: MainItem) -> Unit,
+    private val onRemoveFromGroupDropped: (groupId: String, packageName: String, target: MainItem?) -> Unit = { _, _, _ -> }
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     private var items: List<MainItem> = emptyList()
@@ -90,9 +91,23 @@ class MainAdapter(
                 val clipData = event.clipData
                 if (clipData != null && clipData.itemCount > 0) {
                     val draggedId = clipData.getItemAt(0).text.toString()
-                    val draggedItem = items.find { it.identifier() == draggedId }
-                    if (draggedItem != null && draggedItem.identifier() != targetItem.identifier()) {
-                        onAppDroppedOnto(draggedItem, targetItem)
+                    // Handle removal from group via drag-out (same interaction as creation)
+                    if (draggedId.startsWith("remove:")) {
+                        val parts = draggedId.split(":", limit = 3)
+                        if (parts.size == 3) {
+                            val gid = parts[1]
+                            val pkg = parts[2]
+                            // If dropped back onto same group, treat as place back (no removal)
+                            val targetIsSameGroup = targetItem is MainItem.Group && targetItem.group.id == gid
+                            if (!targetIsSameGroup) {
+                                onRemoveFromGroupDropped(gid, pkg, targetItem)
+                            } // else place back — do nothing
+                        }
+                    } else {
+                        val draggedItem = items.find { it.identifier() == draggedId }
+                        if (draggedItem != null && draggedItem.identifier() != targetItem.identifier()) {
+                            onAppDroppedOnto(draggedItem, targetItem)
+                        }
                     }
                 }
                 return true

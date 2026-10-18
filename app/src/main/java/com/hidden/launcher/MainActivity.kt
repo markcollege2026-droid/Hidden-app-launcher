@@ -26,10 +26,10 @@ import kotlin.math.hypot
 /**
  * Main launcher screen.
  * Displays ONLY selected apps in a compact grid, plus groups.
- * Supports drag-and-drop grouping: long-press an app and drag onto another to create a named group.
  * Groups show closed folder with mini-preview, tap expands via animated overlay (dimmed/blurred background)
  * to scrollable grid (3x3/4x4) on customizable panel.
- * Once grouped, long-pressing an app inside the open folder and dragging it outside removes it from the group (same interaction as creation).
+ * Once grouped, long-pressing an app inside the open folder shrinks folder back to icon
+ * with option to place in available slot (empty area) or back in group (drop on group).
  */
 class MainActivity : AppCompatActivity() {
 
@@ -85,10 +85,14 @@ class MainActivity : AppCompatActivity() {
         folderContentAdapter = FolderContentAdapter(
             onAppClicked = { display -> launchApp(display) },
             onAppLongClicked = { display ->
-                // Long-press fallback: show remove dialog (alternative to drag-out)
                 currentOpenGroup?.let { group ->
                     showRemoveFromGroupDialog(display, group)
                 }
+            },
+            onDragStarted = {
+                // Shrink folder back to its icon so home slots are visible for placement
+                // Same drag interaction as creation — group blocks slots, so it must shrink
+                closeFolderOverlay()
             }
         )
         folderRecycler.layoutManager = GridLayoutManager(this, calculateFolderSpanCount())
@@ -98,18 +102,19 @@ class MainActivity : AppCompatActivity() {
         folderClose.setOnClickListener { closeFolderOverlay() }
         folderCardPanel.setOnClickListener { /* consume */ }
 
-        // Drag-out removal: dropping a grouped app outside the card (on dim background) removes from group
-        setupFolderDragForRemoval()
-
         adapter = MainAdapter(
             onAppClicked = { display -> launchApp(display) },
             onGroupClicked = { group, members, anchor -> openFolderOverlay(group, members, anchor) },
             onGroupLongClicked = { group -> showGroupOptions(group) },
-            onAppDroppedOnto = { dragged, target -> handleDrop(dragged, target) }
+            onAppDroppedOnto = { dragged, target -> handleDrop(dragged, target) },
+            onRemoveFromGroupDropped = { groupId, pkg, target -> handleRemoveDropOnTarget(groupId, pkg, target) }
         )
 
         recyclerView.layoutManager = GridLayoutManager(this, calculateSpanCount())
         recyclerView.adapter = adapter
+
+        // Enable dropping removed group member onto empty slots (available slot) or back onto group
+        setupMainGridDropForRemove()
 
         emptyButton.setOnClickListener { openSettings() }
 
@@ -137,86 +142,95 @@ class MainActivity : AppCompatActivity() {
         hintText.text = getString(R.string.hint_long_press_settings) + " • " + getString(R.string.drag_to_group_hint)
     }
 
-    private fun setupFolderDragForRemoval() {
-        // folderDim is the dimmed background outside the card panel — dropping here removes from group (same drag interaction as creation)
-        val dragListener = View.OnDragListener { v, event ->
+    private fun setupMainGridDropForRemove() {
+        // Handle drops on empty slots (RecyclerView background) for removal — place in available slot
+        val emptySlotDragListener = View.OnDragListener { v, event ->
             when (event.action) {
                 DragEvent.ACTION_DRAG_STARTED -> {
-                    // Accept only our group_member payload
-                    val desc = event.clipDescription
-                    val isRemove = desc?.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) == true &&
+                    val isRemove = event.clipDescription?.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) == true &&
                             event.clipData?.getItemAt(0)?.text?.startsWith("remove:") == true
                     isRemove
                 }
                 DragEvent.ACTION_DRAG_ENTERED -> {
-                    v.setBackgroundColor(Color.parseColor("#66FF4444")) // reddish highlight to indicate removal zone
-                    (v as View).alpha = 0.9f
+                    v.setBackgroundColor(Color.parseColor("#1100BCD4"))
                     true
                 }
                 DragEvent.ACTION_DRAG_EXITED -> {
-                    v.setBackgroundColor(Color.parseColor("#99000000")) // restore dim
-                    v.alpha = 1f
+                    v.setBackgroundColor(Color.TRANSPARENT)
                     true
                 }
                 DragEvent.ACTION_DROP -> {
-                    v.setBackgroundColor(Color.parseColor("#99000000"))
-                    v.alpha = 1f
-                    val clip = event.clipData
-                    if (clip != null && clip.itemCount > 0) {
-                        val text = clip.getItemAt(0).text.toString()
-                        if (text.startsWith("remove:")) {
-                            // Format: remove:<groupId>:<packageName>
-                            val parts = text.split(":", limit = 3)
-                            if (parts.size == 3) {
-                                val gid = parts[1]
-                                val pkg = parts[2]
-                                handleRemoveFromGroup(gid, pkg)
-                            }
+                    v.setBackgroundColor(Color.TRANSPARENT)
+                    val text = event.clipData?.getItemAt(0)?.text?.toString() ?: ""
+                    if (text.startsWith("remove:")) {
+                        val parts = text.split(":", limit = 3)
+                        if (parts.size == 3) {
+                            val gid = parts[1]
+                            val pkg = parts[2]
+                            // Place in available slot — remove from old group, become standalone
+                            handleRemoveFromGroup(gid, pkg)
                         }
                     }
                     true
                 }
                 DragEvent.ACTION_DRAG_ENDED -> {
-                    v.setBackgroundColor(Color.parseColor("#99000000"))
-                    v.alpha = 1f
+                    v.setBackgroundColor(Color.TRANSPARENT)
                     true
                 }
                 else -> false
             }
         }
-        folderDim.setOnDragListener(dragListener)
-        // Also allow dropping on the overlay itself (outside card) as fallback
-        folderOverlay.setOnDragListener { v, event ->
-            // If drop is on card panel, don't handle — let dim handle
-            // We check if event is outside card panel bounds, otherwise ignore
-            // For simplicity, only handle if target is overlay (which includes dim + card) but we already handle dim
-            // So we delegate to dim's listener only if not handled
+        recyclerView.setOnDragListener(emptySlotDragListener)
+        // Also allow dropping on root empty area (outside RecyclerView padding)
+        findViewById<View>(R.id.rootView).setOnDragListener { v, event ->
+            // Only handle if not already handled by recyclerView; we delegate to same logic
+            // To avoid double-handling, check if drop is outside recyclerView bounds
+            // For simplicity, let recyclerView handle; root only handles if recyclerView didn't
             false
         }
+    }
+
+    private fun handleRemoveDropOnTarget(groupId: String, pkg: String, target: MainItem?) {
+        // Called when a grouped app is dragged and dropped onto a main-grid target
+        // Options: place in available slot (target is App and not same group) -> remove
+        // Place back in group (target is same group) -> keep, do nothing
+        if (target is MainItem.Group && target.group.id == groupId) {
+            // Dropped back onto its own group icon — place it back (cancel removal)
+            Toast.makeText(this, "Kept in \"${target.group.name}\"", Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Otherwise, dropping onto any other target (app, different group, empty) means remove from old group
+        // If target is a different group, we will also add to that new group after removal
+        if (target is MainItem.Group) {
+            // Move to different group: remove from old, add to new
+            prefsHelper.removeFromGroup(groupId, pkg)
+            // After removal, the old group may have dissolved; fetch updated to get target still exists
+            // Add to new group
+            prefsHelper.addToGroup(target.group.id, pkg)
+            Toast.makeText(this, getString(R.string.removed_from_group, pkg, target.group.name) + " → moved", Toast.LENGTH_SHORT).show()
+        } else {
+            // Place in available slot — just remove, becomes standalone
+            handleRemoveFromGroup(groupId, pkg)
+            return
+        }
+        refreshApps()
     }
 
     private fun handleRemoveFromGroup(groupId: String, packageName: String) {
         val groups = prefsHelper.getGroups()
         val group = groups.find { it.id == groupId } ?: return
-        val beforeSize = group.packageNames.size
 
         prefsHelper.removeFromGroup(groupId, packageName)
 
         val updatedGroups = prefsHelper.getGroups()
         val stillExists = updatedGroups.any { it.id == groupId }
 
-        val appLabel = try {
-            // Try to get label for toast; fallback to package
-            prefsHelper.getGroups() // not needed
-            packageName
-        } catch (e: Exception) { packageName }
-
         if (!stillExists) {
-            // Group dissolved (was 2 members -> now 1, so dissolved to individuals)
-            Toast.makeText(this, getString(R.string.removed_from_group, appLabel, group.name) + " • " + getString(R.string.ungrouped), Toast.LENGTH_SHORT).show()
-            closeFolderOverlay()
+            Toast.makeText(this, getString(R.string.removed_from_group, packageName, group.name) + " • " + getString(R.string.ungrouped), Toast.LENGTH_SHORT).show()
+            // If overlay was open for this group, close it — it shrank already, but ensure
+            if (currentOpenGroup?.id == groupId) closeFolderOverlay()
         } else {
-            Toast.makeText(this, getString(R.string.removed_from_group, appLabel, group.name), Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.removed_from_group, packageName, group.name), Toast.LENGTH_SHORT).show()
         }
         refreshApps()
     }
@@ -224,7 +238,7 @@ class MainActivity : AppCompatActivity() {
     private fun showRemoveFromGroupDialog(display: SelectedAppDisplay, group: AppGroup) {
         AlertDialog.Builder(this)
             .setTitle(getString(R.string.remove_from_group))
-            .setMessage("Remove \"${display.label}\" from \"${group.name}\" ?\n\nTip: You can also long-press and drag the app outside the folder to remove — same drag interaction as creating groups.")
+            .setMessage("Remove \"${display.label}\" from \"${group.name}\" ?\n\nTip: You can also long-press and drag the app outside the folder — the folder will shrink back to its icon so you can place it in an available slot or back in the group (same drag interaction as creating groups).")
             .setPositiveButton(getString(R.string.remove_from_group)) { _, _ ->
                 handleRemoveFromGroup(group.id, display.packageName)
             }
