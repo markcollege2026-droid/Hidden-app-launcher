@@ -1,6 +1,7 @@
 package com.hidden.launcher
 
 import android.content.ClipData
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.view.LayoutInflater
 import android.view.View
@@ -21,11 +22,21 @@ class FolderContentAdapter(
 
     private var items: List<SelectedAppDisplay> = emptyList()
     private var currentGroupId: String? = null
+    private val iconOverrides = mutableMapOf<String, Drawable>()
 
     fun submitList(newItems: List<SelectedAppDisplay>, groupId: String? = null) {
         items = newItems
         currentGroupId = groupId
+        iconOverrides.keys.retainAll(newItems.map { it.packageName }.toSet())
         notifyDataSetChanged()
+    }
+
+    /** Attach an icon that finished loading after the folder was rendered. */
+    fun setIcon(packageName: String, icon: Drawable) {
+        iconOverrides[packageName] = icon
+        for (position in items.indices) {
+            if (items[position].packageName == packageName) notifyItemChanged(position)
+        }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
@@ -45,10 +56,17 @@ class FolderContentAdapter(
 
         fun bind(item: SelectedAppDisplay) {
             labelView.text = item.label
-            if (item.icon != null) {
-                iconView.setImageDrawable(item.icon)
+            val icon = if (item.isPlaceholder) null else iconOverrides[item.packageName] ?: item.icon
+            if (icon != null) {
+                iconView.setImageDrawable(icon)
             } else {
-                iconView.setImageResource(android.R.drawable.sym_def_app_icon)
+                iconView.setImageResource(R.drawable.ic_app_placeholder)
+            }
+            if (item.isPlaceholder) {
+                itemView.alpha = 0.5f
+                itemView.setOnClickListener(null)
+                itemView.setOnLongClickListener(null)
+                return
             }
             if (!item.isAvailable || !item.launchable) {
                 itemView.alpha = 0.4f

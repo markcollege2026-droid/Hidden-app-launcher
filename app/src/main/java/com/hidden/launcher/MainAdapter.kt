@@ -3,6 +3,7 @@ package com.hidden.launcher
 import android.content.ClipData
 import android.content.ClipDescription
 import android.graphics.Color
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.util.TypedValue
 import android.view.DragEvent
@@ -25,14 +26,44 @@ class MainAdapter(
 
     private var items: List<MainItem> = emptyList()
 
+    /**
+     * Icons that arrived after the list was rendered (progressive icon loading).
+     * Cleared lazily by [submitList] so a refresh keeps icons that are still valid.
+     */
+    private val iconOverrides = mutableMapOf<String, Drawable>()
+
     companion object {
         private const val TYPE_APP = 0
         private const val TYPE_GROUP = 1
+        private const val PAYLOAD_ICON = "icon"
     }
 
     fun submitList(newItems: List<MainItem>) {
         items = newItems
+        val livePackages = newItems.flatMap { item ->
+            when (item) {
+                is MainItem.App -> listOf(item.display.packageName)
+                is MainItem.Group -> item.group.packageNames
+            }
+        }.toSet()
+        iconOverrides.keys.retainAll(livePackages)
         notifyDataSetChanged()
+    }
+
+    /**
+     * Attach a progressively loaded icon without rebuilding the whole grid.
+     * Only affected app tiles / folder previews are re-bound.
+     */
+    fun setIcon(packageName: String, icon: Drawable) {
+        iconOverrides[packageName] = icon
+        for (position in items.indices) {
+            val item = items[position]
+            val affected = when (item) {
+                is MainItem.App -> item.display.packageName == packageName
+                is MainItem.Group -> packageName in item.group.packageNames
+            }
+            if (affected) notifyItemChanged(position, PAYLOAD_ICON)
+        }
     }
 
     fun getItemAt(position: Int): MainItem? = items.getOrNull(position)
@@ -66,6 +97,19 @@ class MainAdapter(
         holder.itemView.setOnDragListener { v, event ->
             handleDragEvent(v, event, item)
         }
+    }
+
+    override fun onBindViewHolder(
+        holder: RecyclerView.ViewHolder,
+        position: Int,
+        payloads: MutableList<Any>
+    ) {
+        // Progressive icon update: only swap the drawable, keep everything else intact.
+        if (payloads.contains(PAYLOAD_ICON) && holder is AppViewHolder) {
+            holder.bindIcon((items[position] as MainItem.App).display)
+            return
+        }
+        super.onBindViewHolder(holder, position, payloads)
     }
 
     override fun getItemCount(): Int = items.size
@@ -127,12 +171,17 @@ class MainAdapter(
 
         fun bind(item: MainItem.App) {
             val app = item.display
-            labelView.text = app.label
-            if (app.icon != null) {
-                iconView.setImageDrawable(app.icon)
-            } else {
-                iconView.setImageResource(android.R.drawable.sym_def_app_icon)
+            if (app.isPlaceholder) {
+                // Metadata is still loading: lightweight skeleton tile, not an error.
+                labelView.text = ""
+                iconView.setImageResource(R.drawable.ic_app_placeholder)
+                itemView.alpha = 0.5f
+                itemView.setOnClickListener(null)
+                itemView.setOnLongClickListener(null)
+                return
             }
+            labelView.text = app.label
+            bindIcon(app)
 
             if (!app.isAvailable || !app.launchable) {
                 itemView.alpha = 0.4f
@@ -159,6 +208,20 @@ class MainAdapter(
                 }
                 v.alpha = 0.7f
                 true
+            }
+        }
+
+        /** Resolve the best icon currently available: progressive override, model, placeholder. */
+        fun bindIcon(app: SelectedAppDisplay) {
+            if (app.isPlaceholder) {
+                iconView.setImageResource(R.drawable.ic_app_placeholder)
+                return
+            }
+            val icon = iconOverrides[app.packageName] ?: app.icon
+            if (icon != null) {
+                iconView.setImageDrawable(icon)
+            } else {
+                iconView.setImageResource(R.drawable.ic_app_placeholder)
             }
         }
     }
@@ -245,10 +308,11 @@ class MainAdapter(
                     scaleType = ImageView.ScaleType.FIT_CENTER
                 }
                 val member = showMembers[i]
-                if (member.icon != null) {
-                    iv.setImageDrawable(member.icon)
+                val memberIcon = iconOverrides[member.packageName] ?: member.icon
+                if (member.isPlaceholder || memberIcon == null) {
+                    iv.setImageResource(R.drawable.ic_app_placeholder)
                 } else {
-                    iv.setImageResource(android.R.drawable.sym_def_app_icon)
+                    iv.setImageDrawable(memberIcon)
                 }
                 if (!member.isAvailable || !member.launchable) {
                     iv.alpha = 0.4f
