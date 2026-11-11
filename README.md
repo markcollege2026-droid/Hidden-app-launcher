@@ -117,7 +117,7 @@ Workflow `.github/workflows/build.yml` runs on push/PR/manual:
 - Verifies release keystore
 - Gradle cache
 - `./gradlew testDebugUnitTest`
-- `./gradlew lintDebug` (non-blocking)
+- `./gradlew lintDebug` (warnings non-blocking; the `Fail on lint errors` step fails the build on lint errors)
 - Unit-test & lint summary printed to the log; reports uploaded as `test-and-lint-reports`
 - `./gradlew assembleDebug` → `hidden-launcher-debug-apk`
 - `./gradlew assembleRelease` → `hidden-launcher-signed-release-apk` (signed)
@@ -190,7 +190,7 @@ zero permissions and no background service.
 
 ```bash
 ./gradlew testDebugUnitTest   # all unit tests (existing + new)
-./gradlew lintDebug           # non-blocking lint
+./gradlew lintDebug           # warnings non-blocking; CI fails only on lint errors
 ./gradlew assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 ./gradlew assembleRelease     # app/build/outputs/apk/release/app-release.apk
 ```
@@ -240,7 +240,7 @@ gradle/wrapper/
 
 Run: `./gradlew testDebugUnitTest`
 
-Lint: `./gradlew lintDebug` (non-blocking)
+Lint: `./gradlew lintDebug` (warnings are non-blocking; CI fails on lint errors)
 
 Manual on-device checks recommended (no emulator in CI):
 - Picker lists all launchable apps with icons.
