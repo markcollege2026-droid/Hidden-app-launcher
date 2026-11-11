@@ -656,7 +656,14 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             return
         }
-        val intent = appRepository.getLaunchIntent(display.packageName)
+        // Prefer the intent resolved by the background refresh: no PackageManager call
+        // on the UI thread in the common case.
+        val intent = appRepository.getCachedLaunchIntent(display.packageName)
+            ?: if (appRepository.hasResolvedLaunchIntent(display.packageName)) {
+                null
+            } else {
+                appRepository.getLaunchIntent(display.packageName)
+            }
         if (intent == null) {
             Toast.makeText(this, getString(R.string.app_no_intent, display.label), Toast.LENGTH_SHORT).show()
             return

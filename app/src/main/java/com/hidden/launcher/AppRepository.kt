@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.util.LruCache
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Centralizes PackageManager queries with caching and error handling.
@@ -69,6 +71,7 @@ class AppRepository(
 
     /**
      * Get launch intent for a package, handling null and exceptions.
+     * Blocking PackageManager call - prefer [getCachedLaunchIntent] on the UI thread.
      */
     fun getLaunchIntent(packageName: String): Intent? {
         return try {
@@ -77,6 +80,20 @@ class AppRepository(
             null
         }
     }
+
+    /**
+     * Launch intent resolved by the last background availability check, so tapping a
+     * tile does not need a PackageManager round-trip on the UI thread.
+     * Returns a copy: callers are free to add flags.
+     */
+    fun getCachedLaunchIntent(packageName: String): Intent? {
+        if (knownUnlaunchable.contains(packageName)) return null
+        return launchIntents[packageName]?.let { Intent(it) }
+    }
+
+    /** True when the background refresh already resolved launchability for a package. */
+    fun hasResolvedLaunchIntent(packageName: String): Boolean =
+        launchIntents.containsKey(packageName) || knownUnlaunchable.contains(packageName)
 
     // ---- Selected-app-only metadata queries (home screen hot path) ----
 
@@ -132,10 +149,18 @@ class AppRepository(
             val enabled = appInfo.enabled &&
                 enabledSetting != PackageManager.COMPONENT_ENABLED_STATE_DISABLED &&
                 enabledSetting != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
-            val hasLaunchIntent = try {
-                packageManager.getLaunchIntentForPackage(packageName) != null
+            val resolvedLaunchIntent = try {
+                packageManager.getLaunchIntentForPackage(packageName)
             } catch (e: Exception) {
-                false
+                null
+            }
+            val hasLaunchIntent = resolvedLaunchIntent != null
+            if (enabled && resolvedLaunchIntent != null) {
+                launchIntents[packageName] = resolvedLaunchIntent
+                knownUnlaunchable.remove(packageName)
+            } else {
+                launchIntents.remove(packageName)
+                knownUnlaunchable.add(packageName)
             }
             AppAvailability(
                 packageName = packageName,
@@ -196,6 +221,8 @@ class AppRepository(
     fun invalidatePackage(packageName: String) {
         metadataCache?.invalidate(packageName)
         sharedIconCache.remove(packageName)
+        launchIntents.remove(packageName)
+        knownUnlaunchable.remove(packageName)
     }
 
     /**
@@ -265,6 +292,13 @@ class AppRepository(
          * android.util.LruCache is internally synchronized.
          */
         private val sharedIconCache = LruCache<String, Drawable>(ICON_CACHE_SIZE)
+
+        /** Launch intents resolved during background availability checks. */
+        private val launchIntents = ConcurrentHashMap<String, Intent>()
+
+        /** Packages known not to have a launch intent (also covers disabled apps). */
+        private val knownUnlaunchable: MutableSet<String> =
+            Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
         /** Shared repository factory used by both activities. */
         fun create(context: Context): AppRepository {
