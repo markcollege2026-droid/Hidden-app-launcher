@@ -107,7 +107,14 @@ jobs:
           for issue in issues:
               location = issue.find('location')
               where = location.get('file') if location is not None else '?'
-              print(f"  [{issue.get('severity')}] {issue.get('id')} at {where} - {issue.get('message')}")
+              line = location.get('line') if location is not None else '?'
+              print(f"  [{issue.get('severity')}] {issue.get('id')} at {where}:{line} - {issue.get('message')}")
+          for issue in errors[:10]:
+              location = issue.find('location')
+              where = location.get('file') if location is not None else '?'
+              line = location.get('line') if location is not None else '?'
+              message = (issue.get('message') or '').replace('%', '%25').replace('\n', ' ')
+              print(f"::error title=lint:{issue.get('id')}::{message} ({where}:{line})")
           if errors:
               raise SystemExit(f"{len(errors)} lint error(s) found")
           PY
