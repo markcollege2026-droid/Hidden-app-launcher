@@ -74,6 +74,8 @@ jobs:
               print(f"{root.get('name')}: {root.get('tests')} tests, "
                     f"{root.get('failures')} failures, {root.get('errors')} errors")
           print(f"TOTAL: {total} tests, {failures} failures, {errors} errors, {skipped} skipped")
+          if total == 0:
+              raise SystemExit("No unit tests were executed!")
 
           lint_path = 'app/build/reports/lint-results-debug.xml'
           try:
@@ -86,6 +88,28 @@ jobs:
                   print(f"  [{issue.get('severity')}] {issue.get('id')} at {where}:{line} - {issue.get('message')}")
           except Exception as exc:
               print(f"No lint report parsed: {exc}")
+          PY
+
+      - name: Fail on lint errors
+        run: |
+          python3 - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path = 'app/build/reports/lint-results-debug.xml'
+          try:
+              issues = ET.parse(path).getroot().findall('issue')
+          except Exception as exc:
+              raise SystemExit(f"Lint report missing, lint did not run: {exc}")
+
+          errors = [i for i in issues if i.get('severity') == 'Error']
+          print(f"Lint issues: {len(issues)} total, {len(errors)} errors")
+          for issue in issues:
+              location = issue.find('location')
+              where = location.get('file') if location is not None else '?'
+              print(f"  [{issue.get('severity')}] {issue.get('id')} at {where} - {issue.get('message')}")
+          if errors:
+              raise SystemExit(f"{len(errors)} lint error(s) found")
           PY
 
       - name: Upload test & lint reports
