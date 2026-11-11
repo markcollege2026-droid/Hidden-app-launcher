@@ -6,6 +6,16 @@ on:
   pull_request:
     branches: [ "**" ]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish a GitHub release from this build'
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Release tag to create (e.g. v1.0)'
+        type: string
+        required: false
+        default: 'v1.0'
 
 jobs:
   build:
@@ -139,6 +149,96 @@ jobs:
       - name: Build signed release APK
         run: ./gradlew assembleRelease --stacktrace
 
+      - name: Verify AppLock exemption (merged manifest + APKs)
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import re
+          import subprocess
+          import xml.etree.ElementTree as ET
+
+          NS = '{http://schemas.android.com/apk/res/android}'
+          MARKER = 'dev.pranav.applock.AUTOLOCK_EXEMPT'
+          problems = []
+          verified = []
+
+          merged = [
+              p for p in glob.glob('app/build/intermediates/**/AndroidManifest.xml', recursive=True)
+              if 'merged_manifest' in p
+          ]
+          if not merged:
+              problems.append('no merged manifest found under app/build/intermediates')
+          for path in sorted(merged):
+              try:
+                  root = ET.parse(path).getroot()
+              except Exception as exc:
+                  problems.append(f'{path}: invalid XML ({exc})')
+                  continue
+              application = root.find('application')
+              entries = [] if application is None else [
+                  m for m in application.findall('meta-data')
+                  if m.get(NS + 'name') == MARKER
+              ]
+              if not entries:
+                  problems.append(f'{path}: marker missing')
+              elif len(entries) > 1:
+                  problems.append(f'{path}: marker declared {len(entries)} times')
+              elif entries[0].get(NS + 'value') != 'true':
+                  problems.append(
+                      f'{path}: marker value is {entries[0].get(NS + "value")!r}, expected "true"'
+                  )
+              else:
+                  verified.append(f'merged manifest {path}')
+
+          aapt2 = os.path.join(os.environ.get('ANDROID_HOME', ''), 'build-tools', '34.0.0', 'aapt2')
+          apks = sorted(glob.glob('app/build/outputs/apk/**/*.apk', recursive=True))
+          if not apks:
+              problems.append('no APKs found under app/build/outputs/apk')
+          for apk in apks:
+              if os.path.getsize(apk) == 0:
+                  problems.append(f'{apk}: empty file')
+                  continue
+              try:
+                  dump = subprocess.run(
+                      [aapt2, 'dump', 'xmltree', apk, '--file', 'AndroidManifest.xml'],
+                      check=True, capture_output=True, text=True
+                  ).stdout
+              except Exception as exc:
+                  problems.append(f'{apk}: aapt2 dump failed ({exc})')
+                  continue
+              blocks = []
+              current = None
+              for raw_line in dump.splitlines():
+                  line = raw_line.strip()
+                  if line.startswith('E: '):
+                      current = [line] if line.startswith('E: meta-data') else None
+                      if current is not None:
+                          blocks.append(current)
+                  elif current is not None and line.startswith('A: '):
+                      current.append(line)
+                  elif not line:
+                      current = None
+              candidates = [b for b in blocks if any(MARKER in line for line in b)]
+              if not candidates:
+                  problems.append(f'{apk}: marker missing from packaged manifest')
+              elif not any(
+                  re.search(r':value\([^)]*\)="true"', line)
+                  for block in candidates for line in block
+              ):
+                  problems.append(f'{apk}: marker value is not boolean true in packaged manifest')
+              else:
+                  verified.append(f'APK {apk}')
+
+          for item in verified:
+              print(f'::notice title=applock-exemption::verified in {item}')
+          if problems:
+              for item in problems:
+                  print(f'::error title=applock-exemption::{item}')
+              raise SystemExit(1)
+          print(f'::notice title=applock-exemption::exemption verified in {len(verified)} target(s)')
+          PY
+
       - name: APK size & signing info
         run: |
           echo "=== Debug APK ==="
@@ -164,3 +264,67 @@ jobs:
           name: hidden-launcher-signed-release-apk
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
+
+  release:
+    # Only publishes when explicitly dispatched with publish_release=true, and only
+    # after the build job (tests, lint, APK builds, manifest verification) succeeded.
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download built APKs from this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hidden-launcher-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify artifacts
+        run: |
+          set -euo pipefail
+          ls -lh release-assets
+          test -s release-assets/app-release.apk
+          test -s release-assets/app-debug.apk
+          echo "Built from commit: $GITHUB_SHA"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "release_tag input is required"
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists - refusing to overwrite it"
+            exit 1
+          fi
+          mkdir -p dist
+          cp release-assets/app-release.apk "dist/hidden-launcher-${TAG}-release.apk"
+          cp release-assets/app-debug.apk "dist/hidden-launcher-${TAG}-debug.apk"
+          cat > NOTES.md <<'EOF'
+          Hidden Launcher for Android 11-14 (API 30-34), designed to be triggered by Keymapper.
+
+          Highlights
+          - Shows only the apps you select; grouped folders with drag-and-drop, folder animations and rename/merge/ungroup.
+          - Fast startup and refresh: skeleton tiles instead of an empty-screen flash, metadata queried only for selected apps, progressive icon loading, shared icon LruCache, tiny persistent metadata cache and coalesced refreshes.
+          - AppLock opt-out: declares the `dev.pranav.applock.AUTOLOCK_EXEMPT` application metadata marker so compatible AppLock implementations skip automatic protection/enrollment of the launcher.
+
+          Assets
+          - `hidden-launcher-TAG-release.apk` - signed release APK (demo keystore committed in the repository; not for Play Store publishing).
+          - `hidden-launcher-TAG-debug.apk` - debug APK.
+
+          Requirements: Android 11+ (API 30), no permissions, fully offline.
+          EOF
+          sed -i "s/TAG/${TAG}/g" NOTES.md
+          gh release create "$TAG" dist/*.apk \
+            --target "$GITHUB_SHA" \
+            --title "Hidden Launcher ${TAG}" \
+            --notes-file NOTES.md

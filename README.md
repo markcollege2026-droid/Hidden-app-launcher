@@ -14,6 +14,7 @@ Minimal, lightweight custom app launcher for Android 11–14 (API 30–34), desi
 - **Discreet settings access**: overflow menu (⋮ → Settings), button in empty state, and long-press on background.
 - **Keymapper-ready**: stable `MAIN/LAUNCHER` component, no root/service required.
 - **Offline, no permissions**, no background services, no analytics, minimal APK.
+- **AppLock opt-out**: declares `dev.pranav.applock.AUTOLOCK_EXEMPT` metadata so compatible AppLock apps skip automatic protection of the launcher (see [AppLock automatic-protection exemption](#applock-automatic-protection-exemption)).
 - **Signed release APK** available — built with committed keystore for direct install.
 
 ## Package & Component
@@ -70,6 +71,58 @@ Android 11 enforces package visibility restrictions. This app declares in `Andro
 If your device/OEM launcher uses a non-standard category, and an app is missing from the picker, document it — do not silently add `QUERY_ALL_PACKAGES` without explicit user consent.
 
 The app uses `PackageManager.queryIntentActivities(Intent(ACTION_MAIN).addCategory(CATEGORY_LAUNCHER))` to list launchable apps and `getLaunchIntentForPackage()` to launch, with null checks and `SecurityException` handling.
+
+## AppLock automatic-protection exemption
+
+Hidden Launcher declares itself **exempt from automatic protection/enrollment** by
+AppLock implementations that support the `dev.pranav.applock.AUTOLOCK_EXEMPT` marker
+(reference: [AppLock-auto-lock](https://github.com/markcollege2026-droid/AppLock-auto-lock)).
+A launcher is not a private app, and an AppLock must never sit between the user and the
+launcher used to open other apps, so this app opts out of being auto-enrolled.
+
+The exemption is declared **only** through application-level metadata in
+`app/src/main/AndroidManifest.xml` (inside the `<application>` element):
+
+```xml
+<meta-data
+    android:name="dev.pranav.applock.AUTOLOCK_EXEMPT"
+    android:value="true" />
+```
+
+- Metadata name: `dev.pranav.applock.AUTOLOCK_EXEMPT` (exact string)
+- Metadata value: Boolean `true`
+- Scope: the whole application (no permissions, services, receivers, activities or code)
+- Variants: the project has a single application module (`:app`), a single manifest and
+  no product flavors, so the marker is present in the merged manifest of every build
+  variant (debug and release).
+
+### What this is and is not
+
+- It is a **self-declared opt-out** from *automatic* enrollment by a compatible AppLock.
+- It is **not a security boundary**: any app can add or remove its own metadata, and an
+  AppLock that does not implement this marker simply ignores it.
+- It does **not** remove this app from an AppLock's existing protected list if a user
+  manually added it there, and it does **not** bypass manually applied protection. If
+  you want to protect this launcher manually, that choice is respected by the AppLock.
+
+### How to verify or reproduce
+
+1. Source declaration: `app/src/main/AndroidManifest.xml` → `<application>` → `meta-data`.
+2. Merged manifest after a build:
+   `app/build/intermediates/**/merged_manifest*/**/AndroidManifest.xml`.
+3. Inside the built APK (authoritative, post-merge):
+   ```bash
+   $ANDROID_HOME/build-tools/34.0.0/aapt2 dump xmltree \
+       app/build/outputs/apk/release/app-release.apk --file AndroidManifest.xml \
+       | grep -A 2 AUTOLOCK_EXEMPT
+   # A: http://schemas.android.com/apk/res/android:value(0x01010004)="true" (Raw: "true")
+   ```
+4. CI enforces this: the GitHub Actions workflow step **“Verify AppLock exemption (merged manifest + APKs)”**
+   parses the merged manifest and both APK manifests and fails the build if the marker is
+   missing, duplicated, or not Boolean `true`.
+
+To add the same opt-out to another app, copy the `<meta-data>` element above into that
+app's `AndroidManifest.xml` `<application>` element — nothing else is required.
 
 ## SDK versions
 
@@ -207,7 +260,7 @@ CI (GitHub Actions) runs all of the above on every push; download the APKs from
 ```
 app/
   src/main/
-    AndroidManifest.xml
+    AndroidManifest.xml      # activities, <queries>, AppLock exemption metadata
     java/com/hidden/launcher/
       MainActivity.kt          # instant loading/grid, refresh scheduling, group drag/drop & dialogs
       AppPickerActivity.kt     # search + checkboxes + save

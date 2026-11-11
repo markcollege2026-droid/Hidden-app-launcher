@@ -36,6 +36,17 @@
         android:supportsRtl="true">
 
         <!--
+            AppLock automatic-protection exemption (self-declared opt-out).
+            Compatible AppLock implementations recognize this application-level
+            metadata marker and skip automatic enrollment/protection of this app.
+            Metadata only: no permissions, no components, no runtime code.
+            See README section "AppLock automatic-protection exemption".
+        -->
+        <meta-data
+            android:name="dev.pranav.applock.AUTOLOCK_EXEMPT"
+            android:value="true" />
+
+        <!--
             Main activity - stable component for Keymapper.
             Package: com.hidden.launcher
             Activity: .MainActivity
