@@ -74,10 +74,13 @@ jobs:
               print(f"{root.get('name')}: {root.get('tests')} tests, "
                     f"{root.get('failures')} failures, {root.get('errors')} errors")
           print(f"TOTAL: {total} tests, {failures} failures, {errors} errors, {skipped} skipped")
+          print(f"::notice title=unit-tests::{total} unit tests, {failures} failures, {errors} errors, {skipped} skipped")
           if total == 0:
               raise SystemExit("No unit tests were executed!")
 
           lint_path = 'app/build/reports/lint-results-debug.xml'
+          # Also expose the totals as a check annotation so they are visible without
+          # downloading artifacts or reading raw logs.
           try:
               issues = ET.parse(lint_path).getroot().findall('issue')
               print(f"LINT: {len(issues)} issues {dict(Counter(i.get('severity') for i in issues))}")
