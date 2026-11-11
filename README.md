@@ -5,6 +5,7 @@ Minimal, lightweight custom app launcher for Android 11–14 (API 30–34), desi
 ## Features
 
 - **Displays ONLY selected apps** — never shows all apps by default. Empty state if nothing selected.
+- **Instant startup & refresh** — the first frame paints cached app names/tiles behind lightweight skeleton placeholders; metadata and icons stream in without ever flashing “No apps selected” when apps are selected.
 - **App picker** with search, icons, package names, and checkboxes.
 - **Persists selection** via `SharedPreferences` across restarts and reboots (no DB).
 - **Compact responsive grid** (3–5 columns depending on screen width) — tap to launch.
@@ -116,7 +117,8 @@ Workflow `.github/workflows/build.yml` runs on push/PR/manual:
 - Verifies release keystore
 - Gradle cache
 - `./gradlew testDebugUnitTest`
-- `./gradlew lintDebug`
+- `./gradlew lintDebug` (non-blocking)
+- Unit-test & lint summary printed to the log; reports uploaded as `test-and-lint-reports`
 - `./gradlew assembleDebug` → `hidden-launcher-debug-apk`
 - `./gradlew assembleRelease` → `hidden-launcher-signed-release-apk` (signed)
 
@@ -127,10 +129,78 @@ Download APKs from **Actions → latest run → Artifacts**.
 - **Storage**: `SharedPreferences` file `hidden_launcher_prefs` with keys `selected_packages` (StringSet) and `app_groups` (JSONArray JSON). Lightweight, no DB.
 - **Groups model**: `AppGroup(id=UUID, name, packageNames)` + `MainItem` sealed (App vs Group). Display builder `PrefsHelper.buildDisplayItems()` keeps groups sorted alphabetically, remainder apps sorted.
 - **Drag-and-drop**: Each `item_app` starts `startDragAndDrop(ClipData("app:packageName"))` on long-press; each tile registers `OnDragListener` highlighting drop target (cyan) and calling `handleDrop()` via `PrefsHelper` persistence. Group creation prompts for name; other operations toast and refresh.
-- **Selection flow**: Picker loads launchable apps via `AppRepository`, pre-checks saved set, Save persists; Main refreshes in `onResume()`, prunes groups whose members were deselected.
-- **Icon caching**: `LruCache<String, Drawable>(100)` in `AppRepository` avoids redundant `loadIcon()` calls. Queries run off UI thread (background Thread) to avoid ANR.
-- **No background work**: No `Service`, `BroadcastReceiver`, `WorkManager`, or polling. Battery impact negligible.
+- **Selection flow**: Picker loads launchable apps via `AppRepository`, pre-checks saved set, Save persists (and remembers labels for the instant first paint); Main refreshes on resume, pruning groups whose members were deselected.
+- **Icon caching**: one shared `LruCache<String, Drawable>(100)` for the whole app (used by picker *and* home) so an icon is never loaded twice. Cached icons are painted immediately; missing ones are loaded one-by-one off the UI thread and pop into their tiles.
+- **Selected-only loading**: the home screen never enumerates installed packages. It asks PackageManager only about the selected packages (`getPackageInfo`/`getApplicationLabel`/`getLaunchIntentForPackage`, plus one icon load each) on a background executor; the picker is the only screen that enumerates all launchable apps.
+- **Persistent metadata cache**: `AppMetadataCache` keeps a tiny JSON record (label, enabled flag, versionCode, lastUpdateTime) per selected package in `SharedPreferences`. It gives real names on the first frame and is invalidated on package add/remove/change/replace and whenever a refresh sees a new version/update stamp. It is *never* used as an availability source: availability is always re-read live, and it is pruned to the current selection (max 200 entries).
+- **Refresh coordination**: `RefreshScheduler` allows one refresh at a time, coalesces bursts into a single follow-up, discards outdated results (token + selection signature) and skips refreshing when returning from a launched app if nothing changed. Returning from Settings or a package-change broadcast still refreshes.
+- **Package changes**: a dynamic (in-process only) receiver for `PACKAGE_ADDED/REMOVED/CHANGED/REPLACED` registered in `onCreate`/`onDestroy`; broadcasts for packages outside the selection are ignored. No manifest receiver, no service, no polling, no permissions.
+- **No background work**: no `Service`, no manifest `BroadcastReceiver`, no `WorkManager`, no polling. Battery impact negligible.
 - **Offline**: No network permissions, no ads/analytics.
+
+## Startup & refresh performance
+
+This revision focuses on eliminating the blank/empty-screen flash and on doing the
+minimum PackageManager work needed to show the home screen. No architecture or feature
+changes: still "selected apps only", in-memory icon cache, `SharedPreferences` storage,
+zero permissions and no background service.
+
+### What changed
+
+| Area | Before | After |
+| --- | --- | --- |
+| First frame | `emptyView` was visible until a background thread finished; users briefly saw “No apps selected” even with a non-empty selection | Empty state is decided synchronously from the saved selection; a non-empty selection instantly renders **skeleton tiles** (or cached labels) plus a thin indeterminate progress bar |
+| Home-screen load | Enumerated **every** installed launcher activity (`queryIntentActivities`) and loaded **every** icon, then filtered | Queries metadata only for the **selected** packages, off the UI thread; icons are loaded only for selected apps |
+| Labels | Waited for `loadLabel()` per package | Painted immediately from a small persistent metadata cache, then validated live |
+| Icons | Loaded in bulk with the app list; all-or-nothing paint | Streamed in progressively after names/tiles are visible; cached icons never reloaded; placeholder icon in the meantime |
+| Icon cache | One `LruCache` per `AppRepository` instance (picker and home each had their own) | One shared `LruCache(100)` across both activities |
+| Metadata cache | none | `AppMetadataCache`: tiny JSON in `SharedPreferences` (label, enabled, versionCode, lastUpdateTime), pruned to the selection, max 200 entries, invalidated on package add/remove/change/replace and on version/update-stamp mismatch |
+| Refreshes | Every `onResume()` started a fresh background thread; concurrent refreshes could race and paint stale data | `RefreshScheduler`: one refresh at a time, bursts coalesced into a single follow-up, outdated results discarded, no-op resumes skipped |
+| Package changes | Only picked up on the next resume | Dynamic receiver invalidates the affected cache entry/icon and refreshes immediately (only for *selected* packages) |
+
+### Behaviour guarantees kept
+
+- Selected-app-only restriction, selection persistence and group/folder behaviour are untouched.
+- Uninstalled/disabled apps stay in the grid (greyed out, “unavailable”) and never crash or disappear silently.
+- Empty selections still show the “choose apps” empty state — but only when the selection truly is empty.
+- Availability is always re-checked live; the persistent cache can never make a removed/disabled app look launchable.
+- Android 11–14 compatibility, `<queries>` package visibility, offline operation, zero extra permissions.
+
+### Changed files
+
+| File | Change |
+| --- | --- |
+| `app/src/main/java/com/hidden/launcher/MainActivity.kt` | Instant skeleton/cached first paint, selected-only background loading, progressive icons, refresh scheduling, package-change receiver |
+| `app/src/main/java/com/hidden/launcher/AppRepository.kt` | Shared icon `LruCache`, per-package availability query with `PackageInfo` metadata, persistent-cache integration, `buildSelectedDisplays()` pure resolver |
+| `app/src/main/java/com/hidden/launcher/AppInfo.kt` | `SelectedAppDisplay.isPlaceholder`, `CachedAppMeta`, `AppAvailability` models |
+| `app/src/main/java/com/hidden/launcher/AppMetadataCache.kt` | **new** — persistent metadata cache + `KeyValueStore` abstraction |
+| `app/src/main/java/com/hidden/launcher/RefreshPolicy.kt` | **new** — `HomeState`/`HomeUiState` (loading vs. empty), `RefreshScheduler` (coalescing, stale results, no-op resumes) |
+| `app/src/main/java/com/hidden/launcher/MainAdapter.kt` | Skeleton tile binding, payload-based progressive icon updates |
+| `app/src/main/java/com/hidden/launcher/FolderContentAdapter.kt` | Progressive icons + placeholders inside open folders |
+| `app/src/main/java/com/hidden/launcher/AppPickerActivity.kt` | Uses the shared repository; remembers labels of newly selected apps for the instant first paint |
+| `app/src/main/res/layout/activity_main.xml` | Skeleton/empty/grid visibility decided at runtime, thin loading indicator |
+| `app/src/main/res/drawable/ic_app_placeholder.xml` | **new** — lightweight placeholder icon |
+| `app/src/main/res/values/strings.xml` | Loading-state strings |
+| `app/src/test/java/com/hidden/launcher/HomeLoadingTest.kt` | **new** — loading vs. empty, cached/placeholder paint, selected-only resolution, missing/disabled packages |
+| `app/src/test/java/com/hidden/launcher/RefreshSchedulerTest.kt` | **new** — rapid/overlapping refreshes, coalescing, stale results, resume skipping |
+| `app/src/test/java/com/hidden/launcher/AppMetadataCacheTest.kt` | **new** — persistence, invalidation, pruning, freshness, malformed data |
+| `.github/workflows/build.yml` | Prints unit-test and lint summaries and uploads test/lint reports |
+
+### Verifying
+
+```bash
+./gradlew testDebugUnitTest   # all unit tests (existing + new)
+./gradlew lintDebug           # non-blocking lint
+./gradlew assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease     # app/build/outputs/apk/release/app-release.apk
+```
+
+CI (GitHub Actions) runs all of the above on every push; download the APKs from
+**Actions → latest run → Artifacts**:
+
+- `hidden-launcher-debug-apk` — `app/build/outputs/apk/debug/app-debug.apk`
+- `hidden-launcher-signed-release-apk` — `app/build/outputs/apk/release/app-release.apk`
+- `test-and-lint-reports` — `app/build/test-results/testDebugUnitTest/`, `app/build/reports/tests/testDebugUnitTest/`, `app/build/reports/lint-results-debug.*`
 
 ## Project structure
 
@@ -139,17 +209,19 @@ app/
   src/main/
     AndroidManifest.xml
     java/com/hidden/launcher/
-      MainActivity.kt          # grid + empty state + group drag/drop & dialogs
+      MainActivity.kt          # instant loading/grid, refresh scheduling, group drag/drop & dialogs
       AppPickerActivity.kt     # search + checkboxes + save
-      MainAdapter.kt / PickerAdapter.kt
-      AppRepository.kt         # PackageManager queries + cache
+      MainAdapter.kt / PickerAdapter.kt / FolderContentAdapter.kt
+      AppRepository.kt         # selected-only PackageManager queries + shared icon cache
+      AppMetadataCache.kt      # tiny persistent label/metadata cache
+      RefreshPolicy.kt         # loading state + refresh scheduler (coalescing)
       PrefsHelper.kt           # SharedPreferences + groups JSON
       AppInfo.kt / AppGroup.kt # data models + MainItem sealed
     res/
       layout/ (activity_main, activity_picker, item_app, item_group, item_picker)
       values/ (strings, themes, colors)
       menu/ (menu_main, menu_picker)
-      drawable/ (ic_launcher, ic_folder)
+      drawable/ (ic_launcher, ic_folder, ic_app_placeholder)
   src/test/  # Unit tests
   release.keystore # demo signed keystore
 .github/workflows/build.yml
@@ -162,6 +234,9 @@ gradle/wrapper/
 - `AppRepositoryTest`: uninstalled/disabled handling, preserves selections.
 - `SelectionPersistenceTest`: round-trip, duplicates, survive reboot.
 - `GroupTest`: buildDisplayItems grouping, sorting, JSON round-trip, pruning, groupingAction (create/add/merge), identifier format, drag-to-group creation.
+- `HomeLoadingTest`: empty selection is `EMPTY` (not loading), non-empty selection is `LOADING` (never the empty state), cached metadata paints labelled tiles instantly, unknown packages become placeholders, placeholders are replaced once metadata arrives, only selected packages are resolved/looked up, uninstalled/disabled packages stay visible but unavailable, stale cache can never fake availability, selection signature changes with selection/groups.
+- `RefreshSchedulerTest`: one refresh at a time, coalescing of rapid/overlapping requests, stale result/completion discarding, resume skipped when nothing changed, resume runs after selection or package changes, settings-return behaviour, coalesced package change not lost.
+- `AppMetadataCacheTest`: persistence across instances, invalidation of a single package, pruning to the selection, max-entry bounding, freshness detection on version/update-stamp changes, malformed/blank JSON, lossless encode/decode, no writes when nothing changes.
 
 Run: `./gradlew testDebugUnitTest`
 
@@ -184,8 +259,8 @@ Manual on-device checks recommended (no emulator in CI):
 
 - Only apps with launcher activity appear in picker. System apps/services without launchers excluded (by design).
 - Groups are tap-to-open list, not home-screen folders with inline previews — narrow scope.
-- Icons cached in memory only; disk cache not needed.
-- Refresh on-resume, not via package-change receiver (lightweight, permission-free).
+- Icons cached in memory only (shared `LruCache`); no disk icon cache — the persistent metadata cache only stores labels/flags.
+- Package changes for *selected* packages are picked up by a dynamic receiver; unrelated packages are deliberately ignored to avoid refresh storms.
 - Demo keystore is public — for testing only; do not publish apps to Play Store with it.
 
 ## License

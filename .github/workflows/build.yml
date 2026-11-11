@@ -56,6 +56,49 @@ jobs:
         run: ./gradlew lintDebug --stacktrace
         continue-on-error: true
 
+      - name: Unit test & lint summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+          from collections import Counter
+
+          total = failures = errors = skipped = 0
+          for path in sorted(glob.glob('app/build/test-results/testDebugUnitTest/*.xml')):
+              root = ET.parse(path).getroot()
+              total += int(root.get('tests', 0))
+              failures += int(root.get('failures', 0))
+              errors += int(root.get('errors', 0))
+              skipped += int(root.get('skipped', 0))
+              print(f"{root.get('name')}: {root.get('tests')} tests, "
+                    f"{root.get('failures')} failures, {root.get('errors')} errors")
+          print(f"TOTAL: {total} tests, {failures} failures, {errors} errors, {skipped} skipped")
+
+          lint_path = 'app/build/reports/lint-results-debug.xml'
+          try:
+              issues = ET.parse(lint_path).getroot().findall('issue')
+              print(f"LINT: {len(issues)} issues {dict(Counter(i.get('severity') for i in issues))}")
+              for issue in issues:
+                  location = issue.find('location')
+                  where = location.get('file') if location is not None else '?'
+                  line = location.get('line') if location is not None else '?'
+                  print(f"  [{issue.get('severity')}] {issue.get('id')} at {where}:{line} - {issue.get('message')}")
+          except Exception as exc:
+              print(f"No lint report parsed: {exc}")
+          PY
+
+      - name: Upload test & lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-and-lint-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/test-results/testDebugUnitTest
+            app/build/reports/lint-results-debug.*
+          retention-days: 30
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 
