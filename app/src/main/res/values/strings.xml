@@ -12,6 +12,8 @@
     <string name="selection_saved">Saved %1$d app(s)</string>
     <string name="selection_count">Selected: %1$d • Total: %2$d • Showing: %3$d</string>
     <string name="loading">Loading…</string>
+    <string name="loading_apps">Loading apps…</string>
+    <string name="app_loading">App info is still loading…</string>
     <string name="no_apps_found">No launchable apps found</string>
     <string name="unavailable">unavailable</string>
     <string name="app_unavailable">App not installed: %1$s</string>

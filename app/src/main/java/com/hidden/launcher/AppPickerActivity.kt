@@ -41,7 +41,7 @@ class AppPickerActivity : AppCompatActivity() {
         setContentView(R.layout.activity_picker)
 
         prefsHelper = PrefsHelper(this)
-        appRepository = AppRepository(packageManager)
+        appRepository = AppRepository.create(this)
 
         toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
@@ -125,6 +125,9 @@ class AppPickerActivity : AppCompatActivity() {
 
     private fun saveAndFinish() {
         prefsHelper.setSelectedPackages(selectedSet)
+        // Remember labels of the newly selected apps so the home screen can paint real
+        // names on its very first frame after returning from settings.
+        appRepository.rememberLabels(allApps.filter { it.packageName in selectedSet })
         Toast.makeText(this, getString(R.string.selection_saved, selectedSet.size), Toast.LENGTH_SHORT).show()
         finish()
     }

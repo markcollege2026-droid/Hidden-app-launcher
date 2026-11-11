@@ -6,6 +6,16 @@ on:
   pull_request:
     branches: [ "**" ]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish a GitHub release from this build'
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Release tag to create (e.g. v1.0)'
+        type: string
+        required: false
+        default: 'v1.0'
 
 jobs:
   build:
@@ -56,11 +66,227 @@ jobs:
         run: ./gradlew lintDebug --stacktrace
         continue-on-error: true
 
+      - name: Unit test & lint summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+          from collections import Counter
+
+          total = failures = errors = skipped = 0
+          for path in sorted(glob.glob('app/build/test-results/testDebugUnitTest/*.xml')):
+              root = ET.parse(path).getroot()
+              total += int(root.get('tests', 0))
+              failures += int(root.get('failures', 0))
+              errors += int(root.get('errors', 0))
+              skipped += int(root.get('skipped', 0))
+              print(f"{root.get('name')}: {root.get('tests')} tests, "
+                    f"{root.get('failures')} failures, {root.get('errors')} errors")
+          print(f"TOTAL: {total} tests, {failures} failures, {errors} errors, {skipped} skipped")
+          print(f"::notice title=unit-tests::{total} unit tests, {failures} failures, {errors} errors, {skipped} skipped")
+          if total == 0:
+              raise SystemExit("No unit tests were executed!")
+
+          lint_path = 'app/build/reports/lint-results-debug.xml'
+          # Also expose the totals as a check annotation so they are visible without
+          # downloading artifacts or reading raw logs.
+          try:
+              issues = ET.parse(lint_path).getroot().findall('issue')
+              print(f"LINT: {len(issues)} issues {dict(Counter(i.get('severity') for i in issues))}")
+              for issue in issues:
+                  location = issue.find('location')
+                  where = location.get('file') if location is not None else '?'
+                  line = location.get('line') if location is not None else '?'
+                  print(f"  [{issue.get('severity')}] {issue.get('id')} at {where}:{line} - {issue.get('message')}")
+          except Exception as exc:
+              print(f"No lint report parsed: {exc}")
+          PY
+
+      - name: Fail on lint errors
+        run: |
+          python3 - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path = 'app/build/reports/lint-results-debug.xml'
+          try:
+              issues = ET.parse(path).getroot().findall('issue')
+          except Exception as exc:
+              raise SystemExit(f"Lint report missing, lint did not run: {exc}")
+
+          errors = [i for i in issues if i.get('severity') == 'Error']
+          print(f"Lint issues: {len(issues)} total, {len(errors)} errors")
+          for issue in issues:
+              location = issue.find('location')
+              where = location.get('file') if location is not None else '?'
+              line = location.get('line') if location is not None else '?'
+              print(f"  [{issue.get('severity')}] {issue.get('id')} at {where}:{line} - {issue.get('message')}")
+          for issue in errors[:10]:
+              location = issue.find('location')
+              where = location.get('file') if location is not None else '?'
+              line = location.get('line') if location is not None else '?'
+              message = (issue.get('message') or '').replace('%', '%25').replace('\n', ' ')
+              print(f"::error title=lint:{issue.get('id')}::{message} ({where}:{line})")
+          if errors:
+              raise SystemExit(f"{len(errors)} lint error(s) found")
+          PY
+
+      - name: Upload test & lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-and-lint-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/test-results/testDebugUnitTest
+            app/build/reports/lint-results-debug.*
+          retention-days: 30
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 
       - name: Build signed release APK
         run: ./gradlew assembleRelease --stacktrace
+
+      - name: Verify AppLock exemption (merged manifest + APKs)
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import re
+          import subprocess
+          import xml.etree.ElementTree as ET
+
+          NS = '{http://schemas.android.com/apk/res/android}'
+          MARKER = 'dev.pranav.applock.AUTOLOCK_EXEMPT'
+          problems = []
+          verified = []
+
+
+          def check_manifest(xml_text, label):
+              """Return None when the exemption marker is correct, else a problem string."""
+              try:
+                  root = ET.fromstring(xml_text)
+              except Exception as exc:
+                  return f'{label}: unparsable manifest ({exc})'
+              application = root.find('application')
+              entries = [] if application is None else [
+                  m for m in application.findall('meta-data')
+                  if m.get(NS + 'name') == MARKER
+              ]
+              if not entries:
+                  return f'{label}: marker missing'
+              if len(entries) > 1:
+                  return f'{label}: marker declared {len(entries)} times'
+              value = entries[0].get(NS + 'value')
+              if value != 'true':
+                  return f'{label}: marker value is {value!r}, expected "true"'
+              return None
+
+
+          def renders_true(line):
+              """Accept the known renderings of a boolean/string true attribute value."""
+              stripped = line.strip()
+              return (
+                  '"true"' in stripped
+                  or '=true' in stripped
+                  or stripped.endswith('0xffffffff')
+                  or stripped.endswith('(type 0x12)0x1')
+              )
+
+          android_home = os.environ.get('ANDROID_HOME', '')
+          apkanalyzer = None
+          for candidate in glob.glob(os.path.join(android_home, 'cmdline-tools', '**', 'bin', 'apkanalyzer'), recursive=True):
+              apkanalyzer = candidate
+              break
+          aapt2 = os.path.join(android_home, 'build-tools', '34.0.0', 'aapt2')
+
+          # 1. Merged manifests produced by the manifest merger (all variants).
+          merged = [
+              p for p in glob.glob('app/build/intermediates/**/AndroidManifest.xml', recursive=True)
+              if 'merged_manifest' in p
+          ]
+          if not merged:
+              problems.append('no merged manifest found under app/build/intermediates')
+          for path in sorted(merged):
+              problem = check_manifest(open(path, encoding='utf-8').read(), path)
+              if problem:
+                  problems.append(problem)
+              else:
+                  verified.append(f'merged manifest {path}')
+
+          # 2. The packaged manifests inside the actual APKs (post-merge, authoritative).
+          apks = sorted(glob.glob('app/build/outputs/apk/**/*.apk', recursive=True))
+          if not apks:
+              problems.append('no APKs found under app/build/outputs/apk')
+          for apk in apks:
+              if os.path.getsize(apk) == 0:
+                  problems.append(f'{apk}: empty file')
+                  continue
+              decoded = None
+              tool = None
+              if apkanalyzer:
+                  try:
+                      decoded = subprocess.run(
+                          [apkanalyzer, 'manifest', 'print', apk],
+                          check=True, capture_output=True, text=True
+                      ).stdout
+                      tool = 'apkanalyzer'
+                  except Exception:
+                      decoded = None
+              if not decoded:
+                  try:
+                      dump = subprocess.run(
+                          [aapt2, 'dump', 'xmltree', apk, '--file', 'AndroidManifest.xml'],
+                          check=True, capture_output=True, text=True
+                      ).stdout
+                  except Exception as exc:
+                      problems.append(f'{apk}: could not read packaged manifest ({exc})')
+                      continue
+                  # Locate the meta-data element block in the aapt2 xmltree dump.
+                  blocks = []
+                  current = None
+                  for raw_line in dump.splitlines():
+                      line = raw_line.strip()
+                      if line.startswith('E: '):
+                          current = [line] if line.startswith('E: meta-data') else None
+                          if current is not None:
+                              blocks.append(current)
+                      elif current is not None and line.startswith('A: '):
+                          current.append(line)
+                      elif not line:
+                          current = None
+                  candidates = [b for b in blocks if any(MARKER in line for line in b)]
+                  if not candidates:
+                      problems.append(f'{apk}: marker missing from packaged manifest')
+                  else:
+                      value_lines = [l for block in candidates for l in block if ':value(' in l]
+                      print(f"::notice title=applock-exemption::{apk} value: {' | '.join(value_lines) or 'no value attribute'}")
+                      if not value_lines:
+                          problems.append(f'{apk}: marker has no value attribute in packaged manifest')
+                      elif not any(renders_true(line) for line in value_lines):
+                          problems.append(
+                              f'{apk}: marker value is not boolean true in packaged manifest '
+                              f"({'; '.join(value_lines)})"
+                          )
+                      else:
+                          verified.append(f'APK {apk} (aapt2 xmltree)')
+                  continue
+              problem = check_manifest(decoded, f'APK {apk}')
+              if problem:
+                  problems.append(problem)
+              else:
+                  verified.append(f'APK {apk} ({tool})')
+
+          for item in verified:
+              print(f'::notice title=applock-exemption::verified in {item}')
+          if problems:
+              for item in problems:
+                  print(f'::error title=applock-exemption::{item}')
+              raise SystemExit(1)
+          print(f'::notice title=applock-exemption::exemption verified in {len(verified)} target(s)')
+          PY
 
       - name: APK size & signing info
         run: |
@@ -87,3 +313,67 @@ jobs:
           name: hidden-launcher-signed-release-apk
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
+
+  release:
+    # Only publishes when explicitly dispatched with publish_release=true, and only
+    # after the build job (tests, lint, APK builds, manifest verification) succeeded.
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download built APKs from this run
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hidden-launcher-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify artifacts
+        run: |
+          set -euo pipefail
+          ls -lh release-assets
+          test -s release-assets/app-release.apk
+          test -s release-assets/app-debug.apk
+          echo "Built from commit: $GITHUB_SHA"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "release_tag input is required"
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists - refusing to overwrite it"
+            exit 1
+          fi
+          mkdir -p dist
+          cp release-assets/app-release.apk "dist/hidden-launcher-${TAG}-release.apk"
+          cp release-assets/app-debug.apk "dist/hidden-launcher-${TAG}-debug.apk"
+          cat > NOTES.md <<'EOF'
+          Hidden Launcher for Android 11-14 (API 30-34), designed to be triggered by Keymapper.
+
+          Highlights
+          - Shows only the apps you select; grouped folders with drag-and-drop, folder animations and rename/merge/ungroup.
+          - Fast startup and refresh: skeleton tiles instead of an empty-screen flash, metadata queried only for selected apps, progressive icon loading, shared icon LruCache, tiny persistent metadata cache and coalesced refreshes.
+          - AppLock opt-out: declares the `dev.pranav.applock.AUTOLOCK_EXEMPT` application metadata marker so compatible AppLock implementations skip automatic protection/enrollment of the launcher.
+
+          Assets
+          - `hidden-launcher-TAG-release.apk` - signed release APK (demo keystore committed in the repository; not for Play Store publishing).
+          - `hidden-launcher-TAG-debug.apk` - debug APK.
+
+          Requirements: Android 11+ (API 30), no permissions, fully offline.
+          EOF
+          sed -i "s/TAG/${TAG}/g" NOTES.md
+          gh release create "$TAG" dist/*.apk \
+            --target "$GITHUB_SHA" \
+            --title "Hidden Launcher ${TAG}" \
+            --notes-file NOTES.md

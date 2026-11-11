@@ -3,11 +3,17 @@ package com.hidden.launcher
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
 import android.content.ClipDescription
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.DragEvent
 import android.view.Menu
 import android.view.MenuItem
@@ -19,8 +25,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
+import androidx.core.content.ContextCompat
+import androidx.core.view.isVisible
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.math.hypot
 
 /**
@@ -42,8 +52,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var emptyButton: Button
     private lateinit var toolbar: Toolbar
     private lateinit var hintText: TextView
+    private lateinit var loadingIndicator: View
 
     private lateinit var adapter: MainAdapter
+
+    // ---- Refresh / loading coordination ----
+    private val refreshScheduler = RefreshScheduler()
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var refreshExecutor: ExecutorService? = null
+    private var iconExecutor: ExecutorService? = null
+    private var firstResume = true
+    private var isResumed = false
+    private var packagesChangedFlag = false
+    private var packageReceiverRegistered = false
+    private var awaitingSettingsResult = false
 
     // Folder overlay views
     private lateinit var folderOverlay: View
@@ -63,7 +85,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         prefsHelper = PrefsHelper(this)
-        appRepository = AppRepository(packageManager)
+        appRepository = AppRepository.create(this)
 
         toolbar = findViewById(R.id.toolbar)
         setSupportActionBar(toolbar)
@@ -74,6 +96,7 @@ class MainActivity : AppCompatActivity() {
         emptyText = findViewById(R.id.emptyText)
         emptyButton = findViewById(R.id.emptyButton)
         hintText = findViewById(R.id.hintText)
+        loadingIndicator = findViewById(R.id.loadingIndicator)
 
         folderOverlay = findViewById(R.id.folderOverlay)
         folderDim = findViewById(R.id.folderDim)
@@ -140,6 +163,36 @@ class MainActivity : AppCompatActivity() {
         }
 
         hintText.text = getString(R.string.hint_long_press_settings) + " • " + getString(R.string.drag_to_group_hint)
+
+        refreshExecutor = Executors.newSingleThreadExecutor()
+        iconExecutor = Executors.newSingleThreadExecutor()
+
+        // Paint synchronously from prefs + persistent metadata cache: real labels when
+        // known, lightweight skeleton tiles otherwise. The "No apps selected" empty
+        // state is only ever shown when the selection really is empty.
+        renderInitialState()
+        registerPackageReceiver()
+    }
+
+    /**
+     * State shown on the very first frame, before any PackageManager work happens.
+     * SharedPreferences + the small metadata cache are all that is read here.
+     */
+    private fun renderInitialState() {
+        val selected = prefsHelper.getSelectedPackages()
+        if (HomeState.initialState(selected) == HomeUiState.EMPTY) {
+            showEmptyState()
+            return
+        }
+        val displays = AppRepository.buildSelectedDisplays(
+            selectedPackages = selected,
+            cachedMetadata = appRepository.readCachedMetadata(),
+            availability = emptyMap(),
+            iconLookup = { pkg -> appRepository.getCachedIcon(pkg) }
+        )
+        val items = PrefsHelper.buildDisplayItems(displays, prefsHelper.getGroups())
+        showGrid(items)
+        setLoading(displays.any { it.isPlaceholder })
     }
 
     private fun setupMainGridDropForRemove() {
@@ -248,7 +301,42 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        refreshApps()
+        isResumed = true
+
+        val reason = when {
+            firstResume -> RefreshReason.STARTUP
+            awaitingSettingsResult -> RefreshReason.SETTINGS_RETURN
+            else -> RefreshReason.RESUME
+        }
+        firstResume = false
+        awaitingSettingsResult = false
+
+        val packagesChanged = packagesChangedFlag
+        packagesChangedFlag = false
+        requestRefresh(reason, packagesChanged = packagesChanged)
+    }
+
+    override fun onPause() {
+        isResumed = false
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        isResumed = false
+        if (packageReceiverRegistered) {
+            try {
+                unregisterReceiver(packageReceiver)
+            } catch (e: Exception) {
+                // already unregistered
+            }
+            packageReceiverRegistered = false
+        }
+        refreshExecutor?.shutdownNow()
+        iconExecutor?.shutdownNow()
+        refreshExecutor = null
+        iconExecutor = null
+        uiHandler.removeCallbacksAndMessages(null)
+        super.onDestroy()
     }
 
     override fun onBackPressed() {
@@ -278,50 +366,190 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---- Loading / refresh ----
+
+    /** Signature of everything the grid renders; used to skip no-op refreshes. */
+    private fun currentSignature(): String =
+        HomeState.selectionSignature(prefsHelper.getSelectedPackages(), prefsHelper.getGroups())
+
+    private fun postUi(action: () -> Unit) {
+        uiHandler.post {
+            if (!isFinishing && !isDestroyed) action()
+        }
+    }
+
+    private fun setLoading(show: Boolean) {
+        if (::loadingIndicator.isInitialized) loadingIndicator.isVisible = show
+    }
+
     private fun refreshApps() {
+        requestRefresh(RefreshReason.USER_ACTION)
+    }
+
+    /**
+     * Ask for a refresh. [RefreshScheduler] suppresses no-op resumes and coalesces
+     * requests that arrive while another refresh is already running, so rapid resumes
+     * or repeated group edits never spawn overlapping PackageManager work.
+     */
+    private fun requestRefresh(reason: RefreshReason, packagesChanged: Boolean = false) {
+        val token = refreshScheduler.request(reason, currentSignature(), packagesChanged) ?: return
+        runRefresh(token)
+    }
+
+    /**
+     * Runs on the UI thread. Metadata is queried only for the selected packages, off
+     * the UI thread; names/tiles are painted as soon as metadata is known and icons are
+     * streamed in afterwards, one at a time.
+     */
+    private fun runRefresh(token: Int) {
+        val executor = refreshExecutor ?: return
         val selected = prefsHelper.getSelectedPackages()
 
         if (selected.isEmpty()) {
+            // Genuine empty selection - no PackageManager work at all.
             showEmptyState()
+            completeRefresh(token, HomeState.selectionSignature(selected, prefsHelper.getGroups()))
             return
         }
 
-        Thread {
-            val allAppsMap = try {
-                appRepository.getLaunchableApps().associateBy { it.packageName }
+        // Groups whose members were deselected dissolve here, as before.
+        val groups = prefsHelper.pruneGroupsOnSelectionChange(selected)
+        val signature = HomeState.selectionSignature(selected, groups)
+
+        setLoading(true)
+        val cached = appRepository.readCachedMetadata()
+
+        executor.execute {
+            val availability = LinkedHashMap<String, AppAvailability>()
+            try {
+                for (pkg in selected) {
+                    availability[pkg] = appRepository.queryAvailability(pkg)
+                }
             } catch (e: Exception) {
-                emptyMap()
+                // Keep whatever was collected; cached labels/placeholders cover the rest.
+            }
+            try {
+                appRepository.rememberAvailability(availability.values)
+                appRepository.pruneMetadataCache(selected)
+            } catch (e: Exception) {
+                // Cache problems must never break rendering.
             }
 
-            val groups = prefsHelper.pruneGroupsOnSelectionChange(selected)
+            val displays = AppRepository.buildSelectedDisplays(
+                selectedPackages = selected,
+                cachedMetadata = cached,
+                availability = availability,
+                iconLookup = { pkg -> appRepository.getCachedIcon(pkg) }
+            )
+            val items = PrefsHelper.buildDisplayItems(displays, groups)
 
-            val displays = selected.map { pkg ->
-                appRepository.getAppForPackage(pkg, allAppsMap)
-            }
-
-            val mainItems = PrefsHelper.buildDisplayItems(displays, groups)
-
-            runOnUiThread {
-                if (mainItems.isEmpty()) {
-                    showEmptyState()
-                } else {
-                    showGrid(mainItems)
+            postUi {
+                val stillCurrent = currentSignature() == signature
+                if (stillCurrent) {
+                    showGrid(items)
+                    updateOpenFolder(displays, groups)
+                    setLoading(false)
+                    loadIconsProgressively(displays)
                 }
-                currentOpenGroup?.let { openGroup ->
-                    val updatedGroup = groups.find { it.id == openGroup.id }
-                    if (updatedGroup != null) {
-                        val memberDisplays = updatedGroup.packageNames.mapNotNull { pkg -> displays.find { it.packageName == pkg } }
-                        folderTitle.text = getString(R.string.group_contents_title, updatedGroup.name, memberDisplays.size)
-                        folderContentAdapter.submitList(memberDisplays, updatedGroup.id)
-                    } else {
-                        closeFolderOverlay()
-                    }
-                }
+                // Outdated results are discarded (not painted) and only the newest
+                // state is rendered by the coalesced follow-up refresh.
+                completeRefresh(token, signature, stillCurrent)
             }
-        }.start()
+        }
     }
 
+    private fun completeRefresh(token: Int, signature: String, painted: Boolean = true) {
+        val followUp = refreshScheduler.complete(token, signature, painted)
+        if (followUp != null) {
+            runRefresh(followUp)
+        } else if (!painted && refreshScheduler.isIdle() && currentSignature() != signature) {
+            // The result was outdated and nothing was queued: refresh again.
+            requestRefresh(RefreshReason.USER_ACTION)
+        }
+    }
+
+    /**
+     * Icons are loaded one at a time after names/availability are on screen, so tiles
+     * appear instantly and each icon pops in as soon as it is ready. Icons already in
+     * the LruCache are never re-loaded.
+     */
+    private fun loadIconsProgressively(displays: List<SelectedAppDisplay>) {
+        val pending = displays.filter { it.icon == null && !it.isPlaceholder }
+        if (pending.isEmpty()) return
+        val executor = iconExecutor ?: return
+        executor.execute {
+            for (display in pending) {
+                if (isDestroyed) break
+                val icon = appRepository.loadIcon(display.packageName) ?: continue
+                postUi { applyIcon(display.packageName, icon) }
+            }
+        }
+    }
+
+    private fun applyIcon(packageName: String, icon: Drawable) {
+        adapter.setIcon(packageName, icon)
+        folderContentAdapter.setIcon(packageName, icon)
+    }
+
+    private fun updateOpenFolder(displays: List<SelectedAppDisplay>, groups: List<AppGroup>) {
+        val openGroup = currentOpenGroup ?: return
+        val updatedGroup = groups.find { it.id == openGroup.id }
+        if (updatedGroup == null) {
+            closeFolderOverlay()
+            return
+        }
+        val memberDisplays = updatedGroup.packageNames.mapNotNull { pkg -> displays.find { it.packageName == pkg } }
+        currentOpenGroup = updatedGroup
+        folderTitle.text = getString(R.string.group_contents_title, updatedGroup.name, memberDisplays.size)
+        folderContentAdapter.submitList(memberDisplays, updatedGroup.id)
+    }
+
+    // ---- Package change tracking (no manifest receiver, zero permissions) ----
+
+    private val packageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val packageName = intent?.data?.schemeSpecificPart ?: return
+            // Ignore everything unrelated to the selection: this keeps unrelated
+            // installs/updates from triggering home-screen refresh storms.
+            if (!prefsHelper.isSelected(packageName)) return
+            appRepository.invalidatePackage(packageName)
+            packagesChangedFlag = true
+            if (isResumed) {
+                requestRefresh(RefreshReason.PACKAGE_CHANGE, packagesChanged = true)
+            }
+        }
+    }
+
+    private fun registerPackageReceiver() {
+        if (packageReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_CHANGED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                packageReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            packageReceiverRegistered = true
+        } catch (e: Exception) {
+            packageReceiverRegistered = false
+        }
+    }
+
+    /**
+     * Only called when the selection really is empty - never as an interim state while
+     * app information is still loading.
+     */
     private fun showEmptyState() {
+        currentItems = emptyList()
+        adapter.submitList(emptyList())
+        setLoading(false)
         recyclerView.visibility = View.GONE
         emptyView.visibility = View.VISIBLE
         emptyText.text = getString(R.string.empty_state_message)
@@ -415,6 +643,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchApp(display: SelectedAppDisplay) {
+        if (display.isPlaceholder) {
+            // Metadata is still loading - don't report a false "not installed".
+            Toast.makeText(this, getString(R.string.app_loading), Toast.LENGTH_SHORT).show()
+            return
+        }
         if (!display.isAvailable || !display.launchable) {
             val msg = when {
                 !display.isAvailable -> getString(R.string.app_unavailable, display.packageName)
@@ -423,7 +656,14 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
             return
         }
-        val intent = appRepository.getLaunchIntent(display.packageName)
+        // Prefer the intent resolved by the background refresh: no PackageManager call
+        // on the UI thread in the common case.
+        val intent = appRepository.getCachedLaunchIntent(display.packageName)
+            ?: if (appRepository.hasResolvedLaunchIntent(display.packageName)) {
+                null
+            } else {
+                appRepository.getLaunchIntent(display.packageName)
+            }
         if (intent == null) {
             Toast.makeText(this, getString(R.string.app_no_intent, display.label), Toast.LENGTH_SHORT).show()
             return
@@ -536,6 +776,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openSettings() {
+        awaitingSettingsResult = true
         val intent = Intent(this, AppPickerActivity::class.java)
         startActivity(intent)
     }
